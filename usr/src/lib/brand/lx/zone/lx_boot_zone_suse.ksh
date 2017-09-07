@@ -22,7 +22,6 @@
 
 tmpfile=/tmp/lx-suse.$$
 
-
 # Check that the directories we're writing to aren't symlinks outside the zone
 safe_dir /etc
 safe_dir /etc/init.d
@@ -62,20 +61,34 @@ if [[ -f $fnm || -h $fnm ]]; then
 	mv -f $tmpfile $fnm
 fi
 
-#/ # Override network configuration
-#/ zonecfg -z $ZONENAME info net | awk '
-#/ BEGIN {
-#/ 	print("# AUTOMATIC ZONE CONFIG")
-#/ 	print("iface lo inet manual");
-#/ }
-#/ $1 == "physical:" {
-#/ 	print("iface", $2, "inet manual");
-#/ }
-#/ ' > $tmpfile
-#/ fnm=$ZONEROOT/etc/network/interfaces
-#/ if [[ -f $fnm || -h $fnm ]]; then
-#/ 	mv -f $tmpfile $fnm
-#/ fi
+# Override network configuration
+#// for Loopback (lo) configuration
+cat <<LOEOF > $ZONEROOT/etc/sysconfig/network/ifcfg-lo
+# AUTOMATIC ZONE CONFIG
+IPADDR=127.0.0.1/8
+NETMASK=255.0.0.0
+NETWORK=127.0.0.0
+STARTMODE=nfsroot
+BOOTPROTO=static
+USERCONTROL=no
+FIREWALL=no
+LOEOF
+#// for eth0 configuration
+zonecfg -z $ZONENAME info net | awk '
+BEGIN {
+    print("# AUTOMATIC ZONE CONFIG");
+}
+$1 == "physical:" {
+	print("# for interface:", $2)
+    print("STARTMODE=auto")
+    print("BOOTPROTO=dhcp")
+    print("DHCLIENT_SET_DEFAULT_ROUTE=yes");
+}
+' > $tmpfile
+fnm=$ZONEROOT/etc/sysconfig/network/ifcfg-eth0
+if [[ -f $fnm || -h $fnm ]]; then
+	mv -f $tmpfile $fnm
+fi
 
 #
 # The default /etc/inittab might spawn mingetty on each of the virtual consoles
