@@ -25,7 +25,6 @@ tmpfile=/tmp/lx-suse.$$
 # Check that the directories we're writing to aren't symlinks outside the zone
 safe_dir /etc
 safe_dir /etc/init.d
-safe_dir /etc/YaST2
 safe_dir /etc/rc.d/rc0.d
 safe_dir /etc/rc.d/rc1.d
 safe_dir /etc/rc.d/rc2.d
@@ -34,6 +33,9 @@ safe_dir /etc/rc.d/rc4.d
 safe_dir /etc/rc.d/rc5.d
 safe_dir /etc/rc.d/rc6.d
 safe_dir /etc/rc.d/rcS.d
+safe_dir /etc/sysconfig
+safe_dir /etc/sysconfig/network
+safe_dir /etc/YaST2
 safe_opt_dir /etc/selinux
 
 # Populate resolve.conf setup files
@@ -73,6 +75,8 @@ BOOTPROTO=static
 USERCONTROL=no
 FIREWALL=no
 LOEOF
+#// prepare empty network configuration files
+zonecfg -z $ZONENAME info net | egrep "physical:" | awk '{print $2}' | xargs -L 1 -I % touch $ZONEROOT/etc/sysconfig/network/ifcfg-%
 #// for eth0 configuration
 zonecfg -z $ZONENAME info net | awk '
 BEGIN {
