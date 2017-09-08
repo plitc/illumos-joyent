@@ -11,7 +11,7 @@
 #
 
 #
-# Copyright 2015 Joyent, Inc.
+# Copyright 2017 Joyent, Inc.
 # Copyright 2017 ASS-Einrichtungssysteme GmbH, Inc.
 #
 
@@ -21,6 +21,7 @@
 #
 
 tmpfile=/tmp/lx-suse.$$
+
 
 # Check that the directories we're writing to aren't symlinks outside the zone
 safe_dir /etc
@@ -63,9 +64,14 @@ if [[ -f $fnm || -h $fnm ]]; then
 	mv -f $tmpfile $fnm
 fi
 
-# Override network configuration
-#// for Loopback (lo) configuration
-cat <<LOEOF > $ZONEROOT/etc/sysconfig/network/ifcfg-lo
+# network configuration
+netdir="$ZONEROOT/etc/sysconfig/network"
+
+# first cleanup potentially obsolete configuration
+rm -f $netdir/ifcfg-*
+
+# Override network configuration for Loopback (lo) configuration
+cat <<LOEOF > $netdir/ifcfg-lo
 # AUTOMATIC ZONE CONFIG
 IPADDR=127.0.0.1/8
 NETMASK=255.0.0.0
@@ -75,24 +81,17 @@ BOOTPROTO=static
 USERCONTROL=no
 FIREWALL=no
 LOEOF
-#// prepare empty network configuration files
-zonecfg -z $ZONENAME info net | egrep "physical:" | awk '{print $2}' | xargs -L 1 -I % touch $ZONEROOT/etc/sysconfig/network/ifcfg-%
-#// for eth0 configuration
-zonecfg -z $ZONENAME info net | awk '
-BEGIN {
-    print("# AUTOMATIC ZONE CONFIG");
-}
+
+zonecfg -z $ZONENAME info net | awk -v npath=$netdir '
 $1 == "physical:" {
-	print("# for interface:", $2)
-    print("STARTMODE=auto")
-    print("BOOTPROTO=dhcp")
-    print("DHCLIENT_SET_DEFAULT_ROUTE=yes");
+    fname = npath "/ifcfg-" $2
+    print("# Automatic zone config for interface:", $2) > fname
+    print("STARTMODE=auto") >> fname
+    print("BOOTPROTO=dhcp") >> fname
 }
-' > $tmpfile
-fnm=$ZONEROOT/etc/sysconfig/network/ifcfg-eth0
-if [[ -f $fnm || -h $fnm ]]; then
-	mv -f $tmpfile $fnm
-fi
+$1 == "property:" && $2 == "(name=primary,value=\"true\")" {
+    print("DHCLIENT_SET_DEFAULT_ROUTE=yes") >> fname
+}'
 
 #
 # The default /etc/inittab might spawn mingetty on each of the virtual consoles
@@ -115,7 +114,7 @@ if ! egrep -s "Modified by lx brand" $fnm; then
 fi
 
 # The SuSE init uses a combination of traditional rc-style service
-# definitions and upstart-style definitions.
+# definitions and systemd-style definitions.
 
 #
 # The following rc-style scripts attempt to start services or otherwise
@@ -155,7 +154,7 @@ disable_svc()
 
 
 #
-# Now customize upstart
+# Now customize systemd
 #
 
 RMSVCS="
@@ -183,7 +182,7 @@ if [[ -z "$entry" && ! -h $fnm ]]; then
 fi
 
 #
-# upstart modifications are complete
+# systemd modifications are complete
 #
 rm -f $tmpfile
 
