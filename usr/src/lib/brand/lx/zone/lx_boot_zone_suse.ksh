@@ -11,7 +11,7 @@
 #
 
 #
-# Copyright 2015 Joyent, Inc.
+# Copyright 2017 Joyent, Inc.
 # Copyright 2017 ASS-Einrichtungssysteme GmbH, Inc.
 #
 
@@ -26,7 +26,6 @@ tmpfile=/tmp/lx-suse.$$
 # Check that the directories we're writing to aren't symlinks outside the zone
 safe_dir /etc
 safe_dir /etc/init.d
-safe_dir /etc/YaST2
 safe_dir /etc/rc.d/rc0.d
 safe_dir /etc/rc.d/rc1.d
 safe_dir /etc/rc.d/rc2.d
@@ -35,6 +34,9 @@ safe_dir /etc/rc.d/rc4.d
 safe_dir /etc/rc.d/rc5.d
 safe_dir /etc/rc.d/rc6.d
 safe_dir /etc/rc.d/rcS.d
+safe_dir /etc/sysconfig
+safe_dir /etc/sysconfig/network
+safe_dir /etc/YaST2
 safe_opt_dir /etc/selinux
 
 # Populate resolve.conf setup files
@@ -62,20 +64,34 @@ if [[ -f $fnm || -h $fnm ]]; then
 	mv -f $tmpfile $fnm
 fi
 
-#/ # Override network configuration
-#/ zonecfg -z $ZONENAME info net | awk '
-#/ BEGIN {
-#/ 	print("# AUTOMATIC ZONE CONFIG")
-#/ 	print("iface lo inet manual");
-#/ }
-#/ $1 == "physical:" {
-#/ 	print("iface", $2, "inet manual");
-#/ }
-#/ ' > $tmpfile
-#/ fnm=$ZONEROOT/etc/network/interfaces
-#/ if [[ -f $fnm || -h $fnm ]]; then
-#/ 	mv -f $tmpfile $fnm
-#/ fi
+# network configuration
+netdir="$ZONEROOT/etc/sysconfig/network"
+
+# first cleanup potentially obsolete configuration
+rm -f $netdir/ifcfg-*
+
+# Override network configuration for Loopback (lo) configuration
+cat <<LOEOF > $netdir/ifcfg-lo
+# AUTOMATIC ZONE CONFIG
+IPADDR=127.0.0.1/8
+NETMASK=255.0.0.0
+NETWORK=127.0.0.0
+STARTMODE=nfsroot
+BOOTPROTO=static
+USERCONTROL=no
+FIREWALL=no
+LOEOF
+
+zonecfg -z $ZONENAME info net | awk -v npath=$netdir '
+$1 == "physical:" {
+    fname = npath "/ifcfg-" $2
+    print("# Automatic zone config for interface:", $2) > fname
+    print("STARTMODE=auto") >> fname
+    print("BOOTPROTO=dhcp") >> fname
+}
+$1 == "property:" && $2 == "(name=primary,value=\"true\")" {
+    print("DHCLIENT_SET_DEFAULT_ROUTE=yes") >> fname
+}'
 
 #
 # The default /etc/inittab might spawn mingetty on each of the virtual consoles
@@ -98,7 +114,7 @@ if ! egrep -s "Modified by lx brand" $fnm; then
 fi
 
 # The SuSE init uses a combination of traditional rc-style service
-# definitions and upstart-style definitions.
+# definitions and systemd-style definitions.
 
 #
 # The following rc-style scripts attempt to start services or otherwise
@@ -138,7 +154,7 @@ disable_svc()
 
 
 #
-# Now customize upstart
+# Now customize systemd
 #
 
 RMSVCS="
@@ -166,7 +182,7 @@ if [[ -z "$entry" && ! -h $fnm ]]; then
 fi
 
 #
-# upstart modifications are complete
+# systemd modifications are complete
 #
 rm -f $tmpfile
 
