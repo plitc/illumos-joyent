@@ -93,6 +93,27 @@ $1 == "property:" && $2 == "(name=primary,value=\"true\")" {
     print("DHCLIENT_SET_DEFAULT_ROUTE=yes") >> fname
 }'
 
+# This is specific to a systemd-based image
+sysdir="$ZONEROOT/etc/systemd/system"
+if [[ -d $ZONEROOT/etc && ! -h $ZONEROOT/etc && -d $ZONEROOT/etc/systemd &&
+    ! -h $ZONEROOT/etc/systemd && -d $sysdir && ! -h $sysdir ]]; then
+    # don't use NetworkManager wickedd service units
+    rm -f $sysdir/dbus-org.opensuse.Network.AUTO4.service
+    rm -f $sysdir/dbus-org.opensuse.Network.DHCP4.service
+    rm -f $sysdir/dbus-org.opensuse.Network.DHCP6.service
+    rm -f $sysdir/dbus-org.opensuse.Network.Nanny.service
+    rm -f $sysdir/network-online.target.wants/wicked.service
+    rm -f $sysdir/multi-user.target.wants/wicked.service
+    # our network setup needs to run
+    fnm=$sysdir/multi-user.target.wants/network.service
+    if [[ ! -f $fnm ]]; then
+        ln -s /usr/lib/systemd/system/wicked.service \
+            $sysdir/network.service
+    fi
+    # disable purge-kernels.service
+    rm -f $sysdir/multi-user.target.wants/purge-kernels.service
+fi
+
 #
 # The default /etc/inittab might spawn mingetty on each of the virtual consoles
 # as well as xdm on the X console.  Since we don't have virtual consoles nor
