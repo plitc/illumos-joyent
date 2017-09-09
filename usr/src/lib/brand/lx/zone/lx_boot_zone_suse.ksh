@@ -87,7 +87,7 @@ $1 == "physical:" {
     fname = npath "/ifcfg-" $2
     print("# Automatic zone config for interface:", $2) > fname
     print("STARTMODE=auto") >> fname
-    print("BOOTPROTO=dhcp") >> fname
+    print("BOOTPROTO=dhcp4") >> fname
 }
 $1 == "property:" && $2 == "(name=primary,value=\"true\")" {
     print("DHCLIENT_SET_DEFAULT_ROUTE=yes") >> fname
