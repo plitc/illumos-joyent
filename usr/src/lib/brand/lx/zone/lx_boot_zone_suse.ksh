@@ -36,6 +36,10 @@ safe_dir /etc/rc.d/rc6.d
 safe_dir /etc/rc.d/rcS.d
 safe_dir /etc/sysconfig
 safe_dir /etc/sysconfig/network
+safe_opt_dir /etc/systemd
+safe_opt_dir /etc/systemd/system
+safe_opt_dir /etc/systemd/system/multi-user.target.wants
+safe_opt_dir /etc/systemd/system/network-online.target.wants
 safe_dir /etc/YaST2
 safe_opt_dir /etc/selinux
 
@@ -95,8 +99,7 @@ $1 == "property:" && $2 == "(name=primary,value=\"true\")" {
 
 # This is specific to a systemd-based image
 sysdir="$ZONEROOT/etc/systemd/system"
-if [[ -d $ZONEROOT/etc && ! -h $ZONEROOT/etc && -d $ZONEROOT/etc/systemd &&
-    ! -h $ZONEROOT/etc/systemd && -d $sysdir && ! -h $sysdir ]]; then
+if [[ -d $sysdir ]]; then
     # don't use NetworkManager wickedd service units
     rm -f $sysdir/dbus-org.opensuse.Network.AUTO4.service
     rm -f $sysdir/dbus-org.opensuse.Network.DHCP4.service
