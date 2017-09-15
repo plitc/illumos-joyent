@@ -27,8 +27,7 @@
 
 PROGS =	lx_boot
 PROGS += lx_boot_zone_redhat lx_boot_zone_ubuntu lx_boot_zone_debian
-PROGS += lx_boot_zone_busybox
-PROGS += lx_boot_zone_suse
+PROGS += lx_boot_zone_busybox lx_boot_zone_suse
 XMLDOCS =	config.xml platform.xml
 TEMPLATES =	SUNWlx.xml SUNWlx26.xml
 
