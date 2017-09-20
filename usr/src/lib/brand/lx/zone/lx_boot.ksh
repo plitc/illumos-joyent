@@ -83,6 +83,8 @@ elif [[ -f $ZONEROOT/etc/alpine-release ]]; then
 	distro="busybox"
 elif [[ -f $ZONEROOT/etc/SuSE-release ]]; then
 	distro="suse"
+elif [[ -f $ZONEROOT/etc/arch-release ]]; then
+	distro="arch"
 fi
 
 [[ -z $distro ]] && fatal "Unsupported distribution!"
