@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2017 Joyent, Inc.
+# Copyright 2018 Joyent, Inc.
 # Copyright 2017 ASS-Einrichtungssysteme GmbH
 #
 # This lists all the files that illumos-joyent delivers as part of a build.
@@ -1858,11 +1858,22 @@ s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.29=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.30=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.31=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.37=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.42=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.44=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.45=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.46=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.47=pcbe.GenuineIntel.6.15
 s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.58=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.60=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.61=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.62=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.63=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.69=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.70=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.71=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.78=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.79=pcbe.GenuineIntel.6.15
+s platform/i86pc/kernel/pcbe/amd64/pcbe.GenuineIntel.6.85=pcbe.GenuineIntel.6.15
 d platform/i86pc/kernel/sys 0755 root sys
 d platform/i86pc/kernel/sys/amd64 0755 root sys
 f platform/i86pc/kernel/sys/amd64/cpc 0755 root sys
@@ -2092,7 +2103,7 @@ f usr/bin/dumpkeys 0555 root bin
 f usr/bin/echo 0555 root bin
 f usr/bin/ed 0555 root bin
 f usr/bin/edit 0555 root bin
-f usr/bin/egrep 0555 root bin
+h usr/bin/egrep=usr/bin/grep
 f usr/bin/eject 0555 root bin
 h usr/bin/elfdump=usr/lib/isaexec
 f usr/bin/elfedit 0555 root bin
@@ -2111,7 +2122,7 @@ h usr/bin/fc=usr/bin/alias
 f usr/bin/fdetach 0555 root bin
 f usr/bin/fdformat 4555 root bin
 h usr/bin/fg=usr/bin/alias
-f usr/bin/fgrep 0555 root bin
+h usr/bin/fgrep=usr/bin/grep
 h usr/bin/ficl-sys=usr/lib/isaexec
 f usr/bin/file 0555 root bin
 f usr/bin/filesync 0555 root bin
@@ -11026,7 +11037,7 @@ f usr/share/lib/zoneinfo/America/Punta_Arenas 0644 root bin
 f usr/share/lib/zoneinfo/America/Rainy_River 0644 root bin
 f usr/share/lib/zoneinfo/America/Rankin_Inlet 0644 root bin
 f usr/share/lib/zoneinfo/America/Recife 0644 root bin
-h usr/share/lib/zoneinfo/America/Regina=usr/share/lib/zoneinfo/Canada/Saskatchewan
+f usr/share/lib/zoneinfo/America/Regina 0644 root bin
 f usr/share/lib/zoneinfo/America/Resolute 0644 root bin
 h usr/share/lib/zoneinfo/America/Rio_Branco=usr/share/lib/zoneinfo/Brazil/Acre
 h usr/share/lib/zoneinfo/America/Rosario=usr/share/lib/zoneinfo/America/Cordoba
@@ -11144,9 +11155,6 @@ f usr/share/lib/zoneinfo/Asia/Qatar 0644 root bin
 f usr/share/lib/zoneinfo/Asia/Qyzylorda 0644 root bin
 h usr/share/lib/zoneinfo/Asia/Rangoon=usr/share/lib/zoneinfo/Asia/Yangon
 f usr/share/lib/zoneinfo/Asia/Riyadh 0644 root bin
-f usr/share/lib/zoneinfo/Asia/Riyadh87 0644 root bin
-f usr/share/lib/zoneinfo/Asia/Riyadh88 0644 root bin
-f usr/share/lib/zoneinfo/Asia/Riyadh89 0644 root bin
 f usr/share/lib/zoneinfo/Asia/Saigon 0644 root bin
 f usr/share/lib/zoneinfo/Asia/Sakhalin 0644 root bin
 f usr/share/lib/zoneinfo/Asia/Samarkand 0644 root bin
@@ -11221,12 +11229,11 @@ f usr/share/lib/zoneinfo/CST6CDT 0644 root bin
 d usr/share/lib/zoneinfo/Canada 0755 root bin
 f usr/share/lib/zoneinfo/Canada/Atlantic 0644 root bin
 f usr/share/lib/zoneinfo/Canada/Central 0644 root bin
-h usr/share/lib/zoneinfo/Canada/East-Saskatchewan=usr/share/lib/zoneinfo/Canada/Saskatchewan
 f usr/share/lib/zoneinfo/Canada/Eastern 0644 root bin
 f usr/share/lib/zoneinfo/Canada/Mountain 0644 root bin
 f usr/share/lib/zoneinfo/Canada/Newfoundland 0644 root bin
 f usr/share/lib/zoneinfo/Canada/Pacific 0644 root bin
-f usr/share/lib/zoneinfo/Canada/Saskatchewan 0644 root bin
+h usr/share/lib/zoneinfo/Canada/Saskatchewan=usr/share/lib/zoneinfo/America/Regina
 f usr/share/lib/zoneinfo/Canada/Yukon 0644 root bin
 d usr/share/lib/zoneinfo/Chile 0755 root bin
 f usr/share/lib/zoneinfo/Chile/Continental 0644 root bin
@@ -11373,10 +11380,6 @@ d usr/share/lib/zoneinfo/Mexico 0755 root bin
 h usr/share/lib/zoneinfo/Mexico/BajaNorte=usr/share/lib/zoneinfo/America/Tijuana
 f usr/share/lib/zoneinfo/Mexico/BajaSur 0644 root bin
 f usr/share/lib/zoneinfo/Mexico/General 0644 root bin
-d usr/share/lib/zoneinfo/Mideast 0755 root bin
-f usr/share/lib/zoneinfo/Mideast/Riyadh87 0644 root bin
-f usr/share/lib/zoneinfo/Mideast/Riyadh88 0644 root bin
-f usr/share/lib/zoneinfo/Mideast/Riyadh89 0644 root bin
 f usr/share/lib/zoneinfo/NZ 0644 root bin
 f usr/share/lib/zoneinfo/NZ-CHAT 0644 root bin
 h usr/share/lib/zoneinfo/Navajo=usr/share/lib/zoneinfo/US/Mountain
@@ -11465,9 +11468,6 @@ f usr/share/lib/zoneinfo/src/europe 0644 root bin
 f usr/share/lib/zoneinfo/src/factory 0644 root bin
 f usr/share/lib/zoneinfo/src/northamerica 0644 root bin
 f usr/share/lib/zoneinfo/src/pacificnew 0644 root bin
-f usr/share/lib/zoneinfo/src/solar87 0644 root bin
-f usr/share/lib/zoneinfo/src/solar88 0644 root bin
-f usr/share/lib/zoneinfo/src/solar89 0644 root bin
 f usr/share/lib/zoneinfo/src/southamerica 0644 root bin
 f usr/share/lib/zoneinfo/src/systemv 0644 root bin
 d usr/share/lib/zoneinfo/tab 0755 root bin
@@ -20559,18 +20559,18 @@ f usr/xpg4/bin/df 0555 root bin
 f usr/xpg4/bin/du 0555 root bin
 f usr/xpg4/bin/ed 0555 root bin
 f usr/xpg4/bin/edit 0555 root bin
-h usr/xpg4/bin/egrep=usr/xpg4/bin/grep
+s usr/xpg4/bin/egrep=../../bin/grep
 f usr/xpg4/bin/env 0555 root bin
 h usr/xpg4/bin/ex=usr/xpg4/bin/edit
 f usr/xpg4/bin/expr 0555 root bin
 s usr/xpg4/bin/fc=../../bin/alias
 s usr/xpg4/bin/fg=../../bin/alias
-h usr/xpg4/bin/fgrep=usr/xpg4/bin/grep
+s usr/xpg4/bin/fgrep=../../bin/grep
 f usr/xpg4/bin/file 0555 root bin
 f usr/xpg4/bin/find 0555 root bin
 f usr/xpg4/bin/getconf 0555 root bin
 s usr/xpg4/bin/getopts=../../bin/alias
-f usr/xpg4/bin/grep 0555 root bin
+s usr/xpg4/bin/grep=../../bin/grep
 s usr/xpg4/bin/hash=../../bin/alias
 f usr/xpg4/bin/id 0555 root bin
 s usr/xpg4/bin/ipcs=../../bin/ipcs
