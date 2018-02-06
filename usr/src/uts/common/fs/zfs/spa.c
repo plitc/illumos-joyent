@@ -29,6 +29,7 @@
  * Copyright 2016 Toomas Soome <tsoome@me.com>
  * Copyright 2017 Joyent, Inc.
  * Copyright (c) 2017 Datto Inc.
+ * Copyright 2018 OmniOS Community Edition (OmniOSce) Association.
  */
 
 /*
@@ -336,7 +337,7 @@ spa_prop_get(spa_t *spa, nvlist_t **nvp)
 		zprop_source_t src = ZPROP_SRC_DEFAULT;
 		zpool_prop_t prop;
 
-		if ((prop = zpool_name_to_prop(za.za_name)) == ZPROP_INVAL)
+		if ((prop = zpool_name_to_prop(za.za_name)) == ZPOOL_PROP_INVAL)
 			continue;
 
 		switch (za.za_integer_length) {
@@ -424,7 +425,7 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 		zpool_prop_t prop = zpool_name_to_prop(propname);
 
 		switch (prop) {
-		case ZPROP_INVAL:
+		case ZPOOL_PROP_INVAL:
 			if (!zpool_prop_feature(propname)) {
 				error = SET_ERROR(EINVAL);
 				break;
@@ -667,7 +668,7 @@ spa_prop_set(spa_t *spa, nvlist_t *nvp)
 		    prop == ZPOOL_PROP_READONLY)
 			continue;
 
-		if (prop == ZPOOL_PROP_VERSION || prop == ZPROP_INVAL) {
+		if (prop == ZPOOL_PROP_VERSION || prop == ZPOOL_PROP_INVAL) {
 			uint64_t ver;
 
 			if (prop == ZPOOL_PROP_VERSION) {
@@ -4051,6 +4052,9 @@ spa_import_rootpool(char *devpath, char *devid)
 	spa = spa_add(pname, config, NULL);
 	spa->spa_is_root = B_TRUE;
 	spa->spa_import_flags = ZFS_IMPORT_VERBATIM;
+	if (nvlist_lookup_uint64(config, ZPOOL_CONFIG_VERSION,
+	    &spa->spa_ubsync.ub_version) != 0)
+		spa->spa_ubsync.ub_version = SPA_VERSION_INITIAL;
 
 	/*
 	 * Build up a vdev tree based on the boot device's label config.
@@ -6174,7 +6178,7 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 		spa_feature_t fid;
 
 		switch (prop = zpool_name_to_prop(nvpair_name(elem))) {
-		case ZPROP_INVAL:
+		case ZPOOL_PROP_INVAL:
 			/*
 			 * We checked this earlier in spa_prop_validate().
 			 */
