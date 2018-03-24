@@ -36,7 +36,7 @@
  * http://www.illumos.org/license/CDDL.
  *
  * Copyright 2015 Pluribus Networks Inc.
- * Copyright 2017 Joyent, Inc.
+ * Copyright 2018 Joyent, Inc.
  */
 
 #include <sys/cdefs.h>
@@ -85,9 +85,7 @@ __FBSDID("$FreeBSD$");
 #include "fwctl.h"
 #include "ioapic.h"
 #include "mem.h"
-#ifdef	__FreeBSD__
 #include "mevent.h"
-#endif
 #include "mptbl.h"
 #include "pci_emul.h"
 #include "pci_irq.h"
@@ -1121,18 +1119,16 @@ main(int argc, char *argv[])
 	 */
 	fbsdrun_addcpu(ctx, BSP, BSP, rip);
 
-	/*
-	 * Head off to the main event dispatch loop
-	 */
-#ifdef	__FreeBSD__
-	mevent_dispatch();
-#else
+#ifndef __FreeBSD__
 	if (vm_started_cb != NULL) {
 		vm_started_cb();
 	}
-
-	pthread_exit(NULL);
 #endif
+
+	/*
+	 * Head off to the main event dispatch loop
+	 */
+	mevent_dispatch();
 
 	exit(1);
 }
