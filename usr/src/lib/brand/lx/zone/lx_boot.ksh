@@ -85,6 +85,10 @@ elif [[ -f $ZONEROOT/etc/SuSE-release ]]; then
 	distro="suse"
 elif [[ -f $ZONEROOT/etc/arch-release ]]; then
 	distro="arch"
+elif [[ -f $ZONEROOT/etc/nixos-release ]]; then
+	distro="nixos"
+elif [[ -f $ZONEROOT/etc/oracle-release ]]; then
+	distro="oracle"
 fi
 
 [[ -z $distro ]] && fatal "Unsupported distribution!"
