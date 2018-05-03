@@ -10,25 +10,30 @@
 #
 
 #
-# Copyright 2018 Joyent, Inc.
+# Copyright (c) 2018, Joyent, Inc.
 #
 
-SUBDIRS = libvarpd direct files svp
+PROG= ahciem
+LINTPROGS= $(PROG:%=%.ln)
 
-all :=		TARGET = all
-clean :=	TARGET = clean
-clobber :=	TARGET = clobber
-check :=	TARGET = check
-install :=	TARGET = install
-install_h :=	TARGET = install_h
-lint :=		TARGET = lint
+include ../Makefile.cmd
+
+ROOTCMDDIR = $(ROOTLIB)/ahci
+CPPFLAGS += -I$(SRC)/uts/common/
+CFLAGS += $(CCVERBOSE)
+LDLIBS += -ldevinfo
 
 .KEEP_STATE:
 
-all clean clobber install install_h check lint: $(SUBDIRS)
-direct files svp: libvarpd
+all: $(PROG)
 
-$(SUBDIRS):  FRC
-	@cd $@; pwd; $(MAKE) $(TARGET)
+install: all $(ROOTCMD)
 
-FRC:
+clean:
+
+%.ln: %.c
+	$(LINT.c) $< $(LDLIBS)
+
+lint:	$(LINTPROGS)
+
+include ../Makefile.targ
