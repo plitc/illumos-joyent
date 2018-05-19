@@ -479,15 +479,13 @@ add_bhyve_extra_opts(int *argc, char **argv)
 static int
 add_fbuf(int *argc, char **argv)
 {
-	char *val;
 	char conf[MAXPATHLEN];
 	int len;
 
 	/*
 	 * Do not add a frame buffer or tablet if VNC is disabled.
 	 */
-	if ((val = get_zcfg_var("attr", "vnc_port", NULL)) != NULL &&
-	    strcmp(val, "-1") == 0) {
+	if (is_env_string("attr", "vnc_port", NULL, "-1")) {
 		return (0);
 	}
 
