@@ -166,7 +166,9 @@ static struct	psm_ops apix_ops = {
 	apic_state,		/* save, restore apic state for S3 */
 	apic_cpu_ops,		/* CPU control interface. */
 
-	apic_cached_ipivect,
+	apic_get_pir_ipivect,
+	apic_send_pir_ipi,
+	apic_cmci_setup
 };
 
 struct psm_ops *psmops = &apix_ops;
@@ -384,6 +386,8 @@ apix_init()
 		apic_have_32bit_cr8 = 1;
 #endif
 
+	apic_pir_vect = apix_get_ipivect(XC_CPUPOKE_PIL, -1);
+
 	/*
 	 * Initialize IRM pool parameters
 	 */
@@ -543,27 +547,18 @@ apix_init_intr()
 		apic_reg_ops->apic_write(APIC_ERROR_STATUS, 0);
 	}
 
-	/* Enable CMCI interrupt */
-	if (cmi_enable_cmci) {
-		mutex_enter(&cmci_cpu_setup_lock);
-		if (cmci_cpu_setup_registered == 0) {
-			mutex_enter(&cpu_lock);
-			register_cpu_setup_func(cmci_cpu_setup, NULL);
-			mutex_exit(&cpu_lock);
-			cmci_cpu_setup_registered = 1;
-		}
-		mutex_exit(&cmci_cpu_setup_lock);
+	/*
+	 * Ensure a CMCI interrupt is allocated, regardless of whether it is
+	 * enabled or not.
+	 */
+	if (apic_cmci_vect == 0) {
+		const int ipl = 0x2;
+		apic_cmci_vect = apix_get_ipivect(ipl, -1);
+		ASSERT(apic_cmci_vect);
 
-		if (apic_cmci_vect == 0) {
-			int ipl = 0x2;
-			apic_cmci_vect = apix_get_ipivect(ipl, -1);
-			ASSERT(apic_cmci_vect);
-
-			(void) add_avintr(NULL, ipl,
-			    (avfunc)cmi_cmci_trap, "apic cmci intr",
-			    apic_cmci_vect, NULL, NULL, NULL, NULL);
-		}
-		apic_reg_ops->apic_write(APIC_CMCI_VECT, apic_cmci_vect);
+		(void) add_avintr(NULL, ipl,
+		    (avfunc)cmi_cmci_trap, "apic cmci intr",
+		    apic_cmci_vect, NULL, NULL, NULL, NULL);
 	}
 
 	apic_reg_ops->apic_write_task_reg(0);
@@ -1127,8 +1122,10 @@ x2apic_update_psm()
 	 * being apix_foo as opposed to apic_foo and x2apic_foo.
 	 */
 	pops->psm_send_ipi = x2apic_send_ipi;
-
 	send_dirintf = pops->psm_send_ipi;
+
+	pops->psm_send_pir_ipi = x2apic_send_pir_ipi;
+	psm_send_pir_ipi = pops->psm_send_pir_ipi;
 
 	apic_mode = LOCAL_X2APIC;
 	apic_change_ops();
@@ -2588,6 +2585,8 @@ apic_switch_ipi_callback(boolean_t enter)
 		if (apic_poweron_cnt == 0) {
 			pops->psm_send_ipi = apic_common_send_ipi;
 			send_dirintf = pops->psm_send_ipi;
+			pops->psm_send_pir_ipi = apic_common_send_pir_ipi;
+			psm_send_pir_ipi = pops->psm_send_pir_ipi;
 		}
 		apic_poweron_cnt++;
 	} else {
@@ -2596,6 +2595,8 @@ apic_switch_ipi_callback(boolean_t enter)
 		if (apic_poweron_cnt == 0) {
 			pops->psm_send_ipi = x2apic_send_ipi;
 			send_dirintf = pops->psm_send_ipi;
+			pops->psm_send_pir_ipi = x2apic_send_pir_ipi;
+			psm_send_pir_ipi = pops->psm_send_pir_ipi;
 		}
 	}
 	lock_clear(&apic_mode_switch_lock);

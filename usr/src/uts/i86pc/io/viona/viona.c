@@ -37,6 +37,178 @@
  * Copyright 2018 Joyent, Inc.
  */
 
+/*
+ * viona - VirtIO-Net, Accelerated
+ *
+ * The purpose of viona is to provide high performance virtio-net devices to
+ * bhyve guests.  It does so by sitting directly atop MAC, skipping all of the
+ * DLS/DLD stack.
+ *
+ * --------------------
+ * General Architecture
+ * --------------------
+ *
+ * A single viona instance is comprised of a "link" handle and two "rings".
+ * After opening the viona device, it must be associated with a MAC network
+ * interface and a bhyve (vmm) instance to form its link resource.  This is
+ * done with the VNA_IOC_CREATE ioctl, where the datalink ID and vmm fd are
+ * passed in to perform the initialization.  With the MAC client opened, and a
+ * driver handle to the vmm instance established, the device is ready to be
+ * configured by the guest.
+ *
+ * The userspace portion of bhyve, which interfaces with the PCI device
+ * emulation framework, is meant to stay out of the datapath if at all
+ * possible.  Configuration changes made via PCI are mapped to actions which
+ * will steer the operation of the in-kernel logic.
+ *
+ *
+ * -----------
+ * Ring Basics
+ * -----------
+ *
+ * Each viona link has two viona_vring_t entities, RX and TX, for handling data
+ * transfers to and from the guest.  They represent an interface to the
+ * standard virtio ring structures.  When intiailized and active, each ring is
+ * backed by a kernel worker thread (parented to the bhyve process for the
+ * instance) which handles ring events.  The RX worker has the simple task of
+ * watching for ring shutdown conditions.  The TX worker does that in addition
+ * to processing all requests to transmit data.  Data destined for the guest is
+ * delivered directly by MAC to viona_rx() when the ring is active.
+ *
+ *
+ * -----------
+ * Ring States
+ * -----------
+ *
+ * The viona_vring_t instances follow a simple path through the possible state
+ * values represented in virtio_vring_t`vr_state:
+ *
+ *        +<--------------------------------------------+
+ *        |						|
+ *        V						^
+ *  +-----------+	This is the initial state when a link is created or
+ *  | VRS_RESET |	when the ring has been explicitly reset.
+ *  +-----------+
+ *        |						^
+ *        |---* ioctl(VNA_IOC_RING_INIT) issued		|
+ *        |						|
+ *        |						^
+ *        V
+ *  +-----------+	The ring parameters (size, guest physical addresses)
+ *  | VRS_SETUP |	have been set and start-up of the ring worker thread
+ *  +-----------+	has begun.
+ *        |						^
+ *        |						|
+ *        |---* ring worker thread begins execution	|
+ *        |						|
+ *        +-------------------------------------------->+
+ *        |	      | 				^
+ *        |	      |
+ *        |	      *	If ring shutdown is requested (by ioctl or impending
+ *        |		bhyve process death) while the worker thread is
+ *        |		starting, the worker will transition the ring to
+ *        |		VRS_RESET and exit.
+ *        |						^
+ *        |						|
+ *        |						^
+ *        V
+ *  +-----------+	The worker thread associated with the ring has started
+ *  | VRS_INIT  |	executing.  It has allocated any extra resources needed
+ *  +-----------+	for the ring to operate.
+ *        |						^
+ *        |						|
+ *        +-------------------------------------------->+
+ *        |	      |					^
+ *        |	      |
+ *        |	      *	If ring shutdown is requested while the worker is
+ *        |		waiting in VRS_INIT, it will free any extra resources
+ *        |		and transition to VRS_RESET.
+ *        |						^
+ *        |						|
+ *        |--* ioctl(VNA_IOC_RING_KICK) issued		|
+ *        |						^
+ *        V
+ *  +-----------+	The worker thread associated with the ring is executing
+ *  | VRS_RUN   |	workload specific to that ring.
+ *  +-----------+
+ *        |						^
+ *        |---* ioctl(VNA_IOC_RING_RESET) issued	|
+ *        |	(or bhyve process begins exit)		|
+ *        V						|
+ *        +-------------------------------------------->+
+ *
+ *
+ * While the worker thread is not running, changes to vr_state are only made by
+ * viona_ioc_ring_init() under vr_lock.  There, it initializes the ring, starts
+ * the worker, and sets the ring state to VRS_SETUP.  Once the worker thread
+ * has been started, only it may perform ring state transitions (still under
+ * the protection of vr_lock), when requested by outside consumers via
+ * vr_state_flags or when the containing bhyve process initiates an exit.
+ *
+ *
+ * ----------------------------
+ * Transmission mblk_t Handling
+ * ----------------------------
+ *
+ * For incoming frames destined for a bhyve guest, the data must first land in
+ * a host OS buffer from the physical NIC before it is copied into the awaiting
+ * guest buffer(s).  Outbound frames transmitted by the guest are not bound by
+ * this limitation and can avoid extra copying before the buffers are accessed
+ * directly by the NIC.  When a guest designates buffers to be transmitted,
+ * viona translates the guest-physical addresses contained in the ring
+ * descriptors to host-virtual addresses via vmm_dr_gpa2kva().  That pointer is
+ * wrapped in an mblk_t using a preallocated viona_desb_t for the desballoc().
+ * Doing so increments vr_xfer_outstanding, preventing the ring from being
+ * reset (allowing the link to drop its vmm handle to the guest) until all
+ * transmit mblks referencing guest memory have been processed.  Allocation of
+ * the viona_desb_t entries is done during the VRS_INIT stage of the ring
+ * worker thread.  The ring size informs that allocation as the number of
+ * concurrent transmissions is limited by the number of descriptors in the
+ * ring.  This minimizes allocation in the transmit hot-path by aqcuiring those
+ * fixed-size resources during initialization.
+ *
+ * This optimization depends on the underlying NIC driver freeing the mblks in
+ * a timely manner after they have been transmitted by the hardware.  Some
+ * drivers have been found to flush TX descriptors only when new transmissions
+ * are initiated.  This means that there is no upper bound to the time needed
+ * for an mblk to be flushed and can stall bhyve guests from shutting down
+ * since their memory must be free of viona TX references prior to clean-up.
+ *
+ * This expectation of deterministic mblk_t processing is likely the reason
+ * behind the notable exception to the zero-copy TX path: systems with 'bnxe'
+ * loaded will copy transmit data into fresh buffers rather than passing up
+ * zero-copy mblks.  It is a hold-over from the original viona sources provided
+ * by Pluribus and its continued necessity has not been confirmed.
+ *
+ *
+ * ----------------------------
+ * Ring Notification Fast-paths
+ * ----------------------------
+ *
+ * Device operation for viona requires that notifications flow to and from the
+ * guest to indicate certain ring conditions.  In order to minimize latency and
+ * processing overhead, the notification procedures are kept in-kernel whenever
+ * possible.
+ *
+ * Guest-to-host notifications, when new available descriptors have been placed
+ * in the ring, are posted via the 'queue notify' address in the virtio BAR.
+ * The vmm_drv_ioport_hook() interface was added to bhyve which allows viona to
+ * install a callback hook on an ioport address.  Guest exits for accesses to
+ * viona-hooked ioport addresses will result in direct calls to notify the
+ * appropriate ring worker without a trip to userland.
+ *
+ * Host-to-guest notifications in the form of interrupts enjoy similar
+ * acceleration.  Each viona ring can be configured to send MSI notifications
+ * to the guest as virtio conditions dictate.  This in-kernel interrupt
+ * configuration is kept synchronized through viona ioctls which are utilized
+ * during writes to the associated PCI config registers or MSI-X BAR.
+ *
+ * Guests which do not utilize MSI-X will result in viona falling back to the
+ * slow path for interrupts.  It will poll(2) the viona handle, receiving
+ * notification when ring events necessitate the assertion of an interrupt.
+ *
+ */
+
 #include <sys/conf.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -56,6 +228,7 @@
 #include <sys/mac_provider.h>
 #include <sys/mac_client_priv.h>
 #include <sys/vlan.h>
+#include <inet/ip.h>
 
 #include <sys/vmm_drv.h>
 #include <sys/viona_io.h>
@@ -127,6 +300,9 @@
 #define	VIONA_PROBE_BAD_RING_ADDR(r, a)		\
 	VIONA_PROBE2(bad_ring_addr, viona_vring_t *, r, void *, (void *)(a))
 
+#define	VIONA_RING_STAT_INCR(r, name)	\
+	(((r)->vr_stats.rs_ ## name)++)
+
 #pragma pack(1)
 struct virtio_desc {
 	uint64_t	vd_addr;
@@ -169,20 +345,18 @@ struct viona_desb;
 typedef struct viona_desb viona_desb_t;
 
 enum viona_ring_state {
-	VRS_RESET	= 0x00,	/* just allocated or reset */
-	VRS_INIT	= 0x01,	/* init-ed with addrs and worker thread */
-	VRS_RUN		= 0x02,	/* running work routine */
-
-	/* Additional flag(s): */
-	VRS_SETUP	= 0x04,
-	VRS_REQ_START	= 0x08,
-	VRS_REQ_STOP	= 0x10,
+	VRS_RESET	= 0x0,	/* just allocated or reset */
+	VRS_SETUP	= 0x1,	/* addrs setup and starting worker thread */
+	VRS_INIT	= 0x2,	/* worker thread started & waiting to run */
+	VRS_RUN		= 0x3,	/* running work routine */
+};
+enum viona_ring_state_flags {
+	VRSF_REQ_START	= 0x1,	/* start running from INIT state */
+	VRSF_REQ_STOP	= 0x2,	/* stop running, clean up, goto RESET state */
 };
 
-#define	VRS_STATE_MASK (VRS_RESET|VRS_INIT|VRS_RUN)
-
-#define	VRING_NEED_BAIL(ring, proc)				\
-		(((ring)->vr_state & VRS_REQ_STOP) != 0 ||	\
+#define	VRING_NEED_BAIL(ring, proc)					\
+		(((ring)->vr_state_flags & VRSF_REQ_STOP) != 0 ||	\
 		((proc)->p_flag & SEXITING) != 0)
 
 typedef struct viona_vring {
@@ -190,7 +364,8 @@ typedef struct viona_vring {
 
 	kmutex_t	vr_lock;
 	kcondvar_t	vr_cv;
-	uint_t		vr_state;
+	uint16_t	vr_state;
+	uint16_t	vr_state_flags;
 	uint_t		vr_xfer_outstanding;
 	kthread_t	*vr_worker_thread;
 	viona_desb_t	*vr_desb;
@@ -218,6 +393,30 @@ typedef struct viona_vring {
 	volatile uint16_t		*vr_used_idx;
 	volatile struct virtio_used	*vr_used_ring;
 	volatile uint16_t		*vr_used_avail_event;
+
+	/* Per-ring error condition statistics */
+	struct viona_ring_stats {
+		uint64_t	rs_ndesc_too_high;
+		uint64_t	rs_bad_idx;
+		uint64_t	rs_indir_bad_len;
+		uint64_t	rs_indir_bad_nest;
+		uint64_t	rs_indir_bad_next;
+		uint64_t	rs_no_space;
+		uint64_t	rs_too_many_desc;
+
+		uint64_t	rs_bad_ring_addr;
+
+		uint64_t	rs_fail_hcksum;
+		uint64_t	rs_fail_hcksum6;
+		uint64_t	rs_fail_hcksum_proto;
+
+		uint64_t	rs_bad_rx_frame;
+		uint64_t	rs_rx_merge_overrun;
+		uint64_t	rs_rx_merge_underrun;
+		uint64_t	rs_rx_pad_short;
+		uint64_t	rs_too_short;
+		uint64_t	rs_tx_absent;
+	} vr_stats;
 } viona_vring_t;
 
 struct viona_link {
@@ -281,12 +480,13 @@ static int viona_chpoll(dev_t dev, short events, int anyyet, short *reventsp,
     struct pollhead **phpp);
 
 static int viona_ioc_create(viona_soft_state_t *, void *, int, cred_t *);
-static int viona_ioc_delete(viona_soft_state_t *ss);
+static int viona_ioc_delete(viona_soft_state_t *, boolean_t);
 
 static void *viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len);
 
 static void viona_ring_alloc(viona_link_t *, viona_vring_t *);
 static void viona_ring_free(viona_vring_t *);
+static int viona_ring_reset(viona_vring_t *, boolean_t);
 static kthread_t *viona_create_worker(viona_vring_t *);
 
 static int viona_ioc_set_notify_ioport(viona_link_t *, uint_t);
@@ -532,7 +732,7 @@ viona_close(dev_t dev, int flag, int otype, cred_t *credp)
 		return (ENXIO);
 	}
 
-	viona_ioc_delete(ss);
+	VERIFY0(viona_ioc_delete(ss, B_TRUE));
 	ddi_soft_state_free(viona_state, minor);
 	id_free(viona_minors, minor);
 
@@ -556,7 +756,7 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 	case VNA_IOC_CREATE:
 		return (viona_ioc_create(ss, dptr, md, cr));
 	case VNA_IOC_DELETE:
-		return (viona_ioc_delete(ss));
+		return (viona_ioc_delete(ss, B_FALSE));
 	default:
 		break;
 	}
@@ -743,26 +943,41 @@ bail:
 }
 
 static int
-viona_ioc_delete(viona_soft_state_t *ss)
+viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 {
 	viona_link_t *link;
 
 	mutex_enter(&ss->ss_lock);
 	if ((link = ss->ss_link) == NULL) {
+		/* Link destruction already complete */
 		mutex_exit(&ss->ss_lock);
 		return (0);
 	}
 
 	if (link->l_destroyed) {
-		/* Another thread made it here first. */
+		/*
+		 * Link destruction has been started by another thread, but has
+		 * not completed.  This condition should be impossible to
+		 * encounter when performing the on-close destroy of the link,
+		 * since racing ioctl accessors must necessarily be absent.
+		 */
+		VERIFY(!on_close);
 		mutex_exit(&ss->ss_lock);
 		return (EAGAIN);
 	}
+	/*
+	 * The link deletion cannot fail after this point, continuing until its
+	 * successful completion is reached.
+	 */
 	link->l_destroyed = B_TRUE;
 	mutex_exit(&ss->ss_lock);
 
-	VERIFY0(viona_ioc_ring_reset(link, VIONA_VQ_RX));
-	VERIFY0(viona_ioc_ring_reset(link, VIONA_VQ_TX));
+	/*
+	 * Return the rings to their reset state, ignoring any possible
+	 * interruptions from signals.
+	 */
+	VERIFY0(viona_ring_reset(&link->l_vrings[VIONA_VQ_RX], B_FALSE));
+	VERIFY0(viona_ring_reset(&link->l_vrings[VIONA_VQ_TX], B_FALSE));
 
 	mutex_enter(&ss->ss_lock);
 	VERIFY0(viona_ioc_set_notify_ioport(link, 0));
@@ -821,6 +1036,36 @@ viona_ring_free(viona_vring_t *ring)
 }
 
 static int
+viona_ring_reset(viona_vring_t *ring, boolean_t heed_signals)
+{
+	mutex_enter(&ring->vr_lock);
+	if (ring->vr_state == VRS_RESET) {
+		mutex_exit(&ring->vr_lock);
+		return (0);
+	}
+
+	if ((ring->vr_state_flags & VRSF_REQ_STOP) == 0) {
+		ring->vr_state_flags |= VRSF_REQ_STOP;
+		cv_broadcast(&ring->vr_cv);
+	}
+	while (ring->vr_state != VRS_RESET) {
+		if (!heed_signals) {
+			cv_wait(&ring->vr_cv, &ring->vr_lock);
+		} else {
+			int rs;
+
+			rs = cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
+			if (rs <= 0 && ring->vr_state != VRS_RESET) {
+				mutex_exit(&ring->vr_lock);
+				return (EINTR);
+			}
+		}
+	}
+	mutex_exit(&ring->vr_lock);
+	return (0);
+}
+
+static int
 viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
 {
 	vioc_ring_init_t kri;
@@ -849,6 +1094,7 @@ viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
 		mutex_exit(&ring->vr_lock);
 		return (EBUSY);
 	}
+	VERIFY(ring->vr_state_flags == 0);
 
 	pos = kri.ri_qaddr;
 	desc_sz = cnt * sizeof (struct virtio_desc);
@@ -905,13 +1151,16 @@ viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
 	ring->vr_msi_addr = 0;
 	ring->vr_msi_msg = 0;
 
+	/* Clear the stats */
+	bzero(&ring->vr_stats, sizeof (ring->vr_stats));
+
 	t = viona_create_worker(ring);
 	if (t == NULL) {
 		err = ENOMEM;
 		goto fail;
 	}
 	ring->vr_worker_thread = t;
-	ring->vr_state = VRS_RESET|VRS_SETUP;
+	ring->vr_state = VRS_SETUP;
 	cv_broadcast(&ring->vr_cv);
 	mutex_exit(&ring->vr_lock);
 	return (0);
@@ -919,6 +1168,7 @@ viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
 fail:
 	if (ring->vr_desb != NULL) {
 		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * cnt);
+		ring->vr_desb = NULL;
 	}
 	ring->vr_size = 0;
 	ring->vr_mask = 0;
@@ -931,7 +1181,6 @@ fail:
 	ring->vr_used_idx = NULL;
 	ring->vr_used_ring = NULL;
 	ring->vr_used_avail_event = NULL;
-	ring->vr_state = VRS_RESET;
 	mutex_exit(&ring->vr_lock);
 	return (err);
 }
@@ -946,29 +1195,13 @@ viona_ioc_ring_reset(viona_link_t *link, uint_t idx)
 	}
 	ring = &link->l_vrings[idx];
 
-	mutex_enter(&ring->vr_lock);
-	if (ring->vr_state != VRS_RESET) {
-		ring->vr_state |= VRS_REQ_STOP;
-		cv_broadcast(&ring->vr_cv);
-		while (ring->vr_state != VRS_RESET) {
-			cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
-		}
-	}
-	if (ring->vr_desb != NULL) {
-		VERIFY(ring->vr_xfer_outstanding == 0);
-		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
-		ring->vr_desb = NULL;
-	}
-	mutex_exit(&ring->vr_lock);
-
-	return (0);
+	return (viona_ring_reset(ring, B_TRUE));
 }
 
 static int
 viona_ioc_ring_kick(viona_link_t *link, uint_t idx)
 {
 	viona_vring_t *ring;
-	uint_t state;
 	int err;
 
 	if (idx >= VIONA_VQ_MAX) {
@@ -977,10 +1210,16 @@ viona_ioc_ring_kick(viona_link_t *link, uint_t idx)
 	ring = &link->l_vrings[idx];
 
 	mutex_enter(&ring->vr_lock);
-	state = ring->vr_state & VRS_STATE_MASK;
-	switch (state) {
+	switch (ring->vr_state) {
+	case VRS_SETUP:
+		/*
+		 * An early kick to a ring which is starting its worker thread
+		 * is fine.  Once that thread is active, it will process the
+		 * start-up request immediately.
+		 */
+		/* FALLTHROUGH */
 	case VRS_INIT:
-		ring->vr_state |= VRS_REQ_START;
+		ring->vr_state_flags |= VRSF_REQ_START;
 		/* FALLTHROUGH */
 	case VRS_RUN:
 		cv_broadcast(&ring->vr_cv);
@@ -1052,6 +1291,10 @@ viona_ioc_set_notify_ioport(viona_link_t *link, uint_t ioport)
 /*
  * Return the number of available descriptors in the vring taking care of the
  * 16-bit index wraparound.
+ *
+ * Note: If the number of apparently available descriptors is larger than the
+ * ring size (due to guest misbehavior), this check will still report the
+ * positive count of descriptors.
  */
 static inline int
 viona_vr_num_avail(viona_vring_t *ring)
@@ -1067,8 +1310,6 @@ viona_vr_num_avail(viona_vring_t *ring)
 	 */
 	ndesc = (unsigned)*ring->vr_avail_idx - (unsigned)ring->vr_cur_aidx;
 
-	ASSERT(ndesc <= ring->vr_size);
-
 	return (ndesc);
 }
 
@@ -1078,11 +1319,10 @@ viona_worker_rx(viona_vring_t *ring, viona_link_t *link)
 	proc_t *p = ttoproc(curthread);
 
 	ASSERT(MUTEX_HELD(&ring->vr_lock));
-	ASSERT(ring->vr_state == (VRS_INIT|VRS_REQ_START));
+	ASSERT3U(ring->vr_state, ==, VRS_RUN);
 
 	atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
 	mac_rx_set(link->l_mch, viona_rx, link);
-	ring->vr_state = VRS_RUN;
 
 	do {
 		/*
@@ -1094,30 +1334,47 @@ viona_worker_rx(viona_vring_t *ring, viona_link_t *link)
 		(void) cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
 	} while (!VRING_NEED_BAIL(ring, p));
 
+	mutex_exit(&ring->vr_lock);
+	/*
+	 * Clearing the RX function involves MAC quiescing any flows on that
+	 * client.  If MAC happens to be delivering packets to this ring via
+	 * viona_rx() at the time of worker clean-up, that thread may need to
+	 * acquire vr_lock for tasks such as delivering an interrupt.  In order
+	 * to avoid such deadlocks, vr_lock must temporarily be dropped here.
+	 */
 	mac_rx_clear(link->l_mch);
+	mutex_enter(&ring->vr_lock);
 }
 
 static void
 viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
 {
 	proc_t *p = ttoproc(curthread);
-	size_t ntx = 0;
 
 	ASSERT(MUTEX_HELD(&ring->vr_lock));
-	ASSERT(ring->vr_state == (VRS_INIT|VRS_REQ_START));
+	ASSERT3U(ring->vr_state, ==, VRS_RUN);
 
-	ring->vr_state = VRS_RUN;
 	mutex_exit(&ring->vr_lock);
 
 	for (;;) {
 		boolean_t bail = B_FALSE;
+		uint_t ntx = 0;
 
 		atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
 		while (viona_vr_num_avail(ring)) {
 			viona_tx(link, ring);
-			ntx++;
+
+			/*
+			 * It is advantageous for throughput to keep this
+			 * transmission loop tight, but periodic breaks to
+			 * check for other events are of value too.
+			 */
+			if (ntx++ >= ring->vr_size)
+				break;
 		}
 		atomic_and_16(ring->vr_used_flags, ~VRING_USED_F_NO_NOTIFY);
+
+		VIONA_PROBE2(tx, viona_link_t *, link, uint_t, ntx);
 
 		/*
 		 * Check for available descriptors on the ring once more in
@@ -1128,8 +1385,6 @@ viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
 			continue;
 		}
 
-		VIONA_PROBE2(tx, viona_link_t *, link, uint_t, ntx);
-		ntx = 0;
 		if ((link->l_features & VIRTIO_F_RING_NOTIFY_ON_EMPTY) != 0) {
 			viona_intr_ring(ring);
 		}
@@ -1155,6 +1410,12 @@ viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
 		 */
 		cv_wait(&ring->vr_cv, &ring->vr_lock);
 	}
+
+	/* Free any desb resources before the ring is completely stopped */
+	if (ring->vr_desb != NULL) {
+		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
+		ring->vr_desb = NULL;
+	}
 }
 
 static void
@@ -1165,20 +1426,28 @@ viona_worker(void *arg)
 	proc_t *p = ttoproc(curthread);
 
 	mutex_enter(&ring->vr_lock);
-	VERIFY(ring->vr_state == (VRS_RESET|VRS_SETUP));
+	VERIFY3U(ring->vr_state, ==, VRS_SETUP);
+
+	/* Bail immediately if ring shutdown or process exit was requested */
+	if (VRING_NEED_BAIL(ring, p)) {
+		goto cleanup;
+	}
 
 	/* Report worker thread as alive and notify creator */
 	ring->vr_state = VRS_INIT;
 	cv_broadcast(&ring->vr_cv);
 
-	while (ring->vr_state == VRS_INIT) {
+	while (ring->vr_state_flags == 0) {
 		(void) cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
 
 		if (VRING_NEED_BAIL(ring, p)) {
 			goto cleanup;
 		}
 	}
-	ASSERT(ring->vr_state & VRS_REQ_START);
+
+	ASSERT((ring->vr_state_flags & VRSF_REQ_START) != 0);
+	ring->vr_state = VRS_RUN;
+	ring->vr_state_flags &= ~VRSF_REQ_START;
 
 	/* Process actual work */
 	if (ring == &link->l_vrings[VIONA_VQ_RX]) {
@@ -1190,8 +1459,16 @@ viona_worker(void *arg)
 	}
 
 cleanup:
+	/* Free any desb resources before the ring is completely stopped */
+	if (ring->vr_desb != NULL) {
+		VERIFY(ring->vr_xfer_outstanding == 0);
+		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
+		ring->vr_desb = NULL;
+	}
+
 	ring->vr_cur_aidx = 0;
 	ring->vr_state = VRS_RESET;
+	ring->vr_state_flags = 0;
 	ring->vr_worker_thread = NULL;
 	cv_broadcast(&ring->vr_cv);
 	mutex_exit(&ring->vr_lock);
@@ -1280,10 +1557,16 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 		return (0);
 	}
 	if (ndesc > ring->vr_size) {
+		/*
+		 * Despite the fact that the guest has provided an 'avail_idx'
+		 * which indicates that an impossible number of descriptors are
+		 * available, continue on and attempt to process the next one.
+		 *
+		 * The transgression will not escape the probe or stats though.
+		 */
 		VIONA_PROBE2(ndesc_too_high, viona_vring_t *, ring,
 		    uint16_t, ndesc);
-		mutex_exit(&ring->vr_a_mutex);
-		return (-1);
+		VIONA_RING_STAT_INCR(ring, ndesc_too_high);
 	}
 
 	head = ring->vr_avail_ring[idx & ring->vr_mask];
@@ -1293,6 +1576,7 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 		if (next >= ring->vr_size) {
 			VIONA_PROBE2(bad_idx, viona_vring_t *, ring,
 			    uint16_t, next);
+			VIONA_RING_STAT_INCR(ring, bad_idx);
 			goto bail;
 		}
 
@@ -1301,6 +1585,7 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 			buf = viona_gpa2kva(link, vdir.vd_addr, vdir.vd_len);
 			if (buf == NULL) {
 				VIONA_PROBE_BAD_RING_ADDR(ring, vdir.vd_addr);
+				VIONA_RING_STAT_INCR(ring, bad_ring_addr);
 				goto bail;
 			}
 			iov[i].iov_base = buf;
@@ -1314,11 +1599,13 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 				VIONA_PROBE2(indir_bad_len,
 				    viona_vring_t *, ring,
 				    uint32_t, vdir.vd_len);
+				VIONA_RING_STAT_INCR(ring, indir_bad_len);
 				goto bail;
 			}
 			vindir = viona_gpa2kva(link, vdir.vd_addr, vdir.vd_len);
 			if (vindir == NULL) {
 				VIONA_PROBE_BAD_RING_ADDR(ring, vdir.vd_addr);
+				VIONA_RING_STAT_INCR(ring, bad_ring_addr);
 				goto bail;
 			}
 			next = 0;
@@ -1337,6 +1624,8 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 				if (vp.vd_flags & VRING_DESC_F_INDIRECT) {
 					VIONA_PROBE1(indir_bad_nest,
 					    viona_vring_t *, ring);
+					VIONA_RING_STAT_INCR(ring,
+					    indir_bad_nest);
 					goto bail;
 				}
 				buf = viona_gpa2kva(link, vp.vd_addr,
@@ -1344,6 +1633,8 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 				if (buf == NULL) {
 					VIONA_PROBE_BAD_RING_ADDR(ring,
 					    vp.vd_addr);
+					VIONA_RING_STAT_INCR(ring,
+					    bad_ring_addr);
 					goto bail;
 				}
 				iov[i].iov_base = buf;
@@ -1362,6 +1653,8 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 					    viona_vring_t *, ring,
 					    uint16_t, next,
 					    uint_t, nindir);
+					VIONA_RING_STAT_INCR(ring,
+					    indir_bad_next);
 					goto bail;
 				}
 			}
@@ -1376,6 +1669,7 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 
 loopy:
 	VIONA_PROBE1(too_many_desc, viona_vring_t *, ring);
+	VIONA_RING_STAT_INCR(ring, too_many_desc);
 bail:
 	mutex_exit(&ring->vr_a_mutex);
 	return (-1);
@@ -1503,6 +1797,8 @@ viona_recv_plain(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	caddr_t buf = NULL;
 	boolean_t end = B_FALSE;
 
+	ASSERT(msz >= MIN_BUF_SIZE);
+
 	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
 	if (n <= 0) {
 		/* Without available buffers, the frame must be dropped. */
@@ -1540,14 +1836,12 @@ viona_recv_plain(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 		copied += viona_copy_mblk(mp, copied, buf, len, &end);
 	}
 
-	/*
-	 * Is the copied data long enough to be considered an ethernet frame of
-	 * the minimum length?  Does it match the total length of the mblk?
-	 */
-	if (copied < MIN_BUF_SIZE || copied != msz) {
+	/* Was the expected amount of data copied? */
+	if (copied != msz) {
 		VIONA_PROBE5(too_short, viona_vring_t *, ring,
 		    uint16_t, cookie, mblk_t *, mp, size_t, copied,
 		    size_t, msz);
+		VIONA_RING_STAT_INCR(ring, too_short);
 		goto bad_frame;
 	}
 
@@ -1573,6 +1867,8 @@ viona_recv_plain(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 bad_frame:
 	VIONA_PROBE3(bad_rx_frame, viona_vring_t *, ring, uint16_t, cookie,
 	    mblk_t *, mp);
+	VIONA_RING_STAT_INCR(ring, bad_rx_frame);
+
 	vq_pushchain(ring, MAX(copied, MIN_BUF_SIZE + hdr_sz), cookie);
 	return (EINVAL);
 }
@@ -1590,10 +1886,13 @@ viona_recv_merged(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	const size_t hdr_sz = sizeof (struct virtio_net_mrgrxhdr);
 	boolean_t end = B_FALSE;
 
+	ASSERT(msz >= MIN_BUF_SIZE);
+
 	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
 	if (n <= 0) {
 		/* Without available buffers, the frame must be dropped. */
 		VIONA_PROBE2(no_space, viona_vring_t *, ring, mblk_t *, mp);
+		VIONA_RING_STAT_INCR(ring, no_space);
 		return (ENOSPC);
 	}
 	if (iov[0].iov_len < hdr_sz) {
@@ -1661,6 +1960,7 @@ viona_recv_merged(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 				 * drop the packet.
 				 */
 				err = EMSGSIZE;
+				break;
 			}
 			chunk = 0;
 			i = 0;
@@ -1678,15 +1978,15 @@ viona_recv_merged(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	uelem[0].len += hdr_sz;
 
 	/*
-	 * Is the copied data long enough to be considered an ethernet frame of
-	 * the minimum length?  Does it match the total length of the mblk?
+	 * If no other errors were encounted during the copy, was the expected
+	 * amount of data transfered?
 	 */
-	if (copied < MIN_BUF_SIZE || copied != msz) {
-		/* Do not override an existing error */
+	if (err == 0 && copied != msz) {
 		VIONA_PROBE5(too_short, viona_vring_t *, ring,
 		    uint16_t, cookie, mblk_t *, mp, size_t, copied,
 		    size_t, msz);
-		err = (err == 0) ? EINVAL : err;
+		VIONA_RING_STAT_INCR(ring, too_short);
+		err = EINVAL;
 	}
 
 	/* Add chksum bits, if needed */
@@ -1709,16 +2009,19 @@ done:
 	case EMSGSIZE:
 		VIONA_PROBE3(rx_merge_underrun, viona_vring_t *, ring,
 		    uint16_t, cookie, mblk_t *, mp);
+		VIONA_RING_STAT_INCR(ring, rx_merge_underrun);
 		break;
 
 	case EOVERFLOW:
 		VIONA_PROBE3(rx_merge_overrun, viona_vring_t *, ring,
 		    uint16_t, cookie, mblk_t *, mp);
+		VIONA_RING_STAT_INCR(ring, rx_merge_overrun);
 		break;
 
 	default:
 		VIONA_PROBE3(bad_rx_frame, viona_vring_t *, ring,
 		    uint16_t, cookie, mblk_t *, mp);
+		VIONA_RING_STAT_INCR(ring, bad_rx_frame);
 	}
 	vq_pushchain_mrgrx(ring, buf_idx + 1, uelem);
 	return (err);
@@ -1745,10 +2048,16 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 		size = msgsize(mp);
 
 		/*
-		 * Stripping the VLAN tag off already-small frames can cause
-		 * them to fall below the minimum size.  If this happens, pad
-		 * them out as they would have been if they lacked the tag in
-		 * the first place.
+		 * Ethernet frames are expected to be padded out in order to
+		 * meet the minimum size.
+		 *
+		 * A special case is made for frames which are short by
+		 * VLAN_TAGSZ, having been stripped of their VLAN tag while
+		 * traversing MAC.  A preallocated (and recycled) mblk is used
+		 * for that specific condition.
+		 *
+		 * All other frames that fall short on length will have custom
+		 * zero-padding allocated appended to them.
 		 */
 		if (size == NEED_VLAN_PAD_SIZE) {
 			ASSERT(MBLKL(viona_vlan_pad_mp) == VLAN_TAGSZ);
@@ -1759,6 +2068,23 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 
 			pad->b_cont = viona_vlan_pad_mp;
 			size += VLAN_TAGSZ;
+		} else if (size < MIN_BUF_SIZE) {
+			const size_t pad_size = MIN_BUF_SIZE - size;
+			mblk_t *zero_mp;
+
+			zero_mp = allocb(pad_size, BPRI_MED);
+			if (zero_mp == NULL) {
+				err = ENOMEM;
+				goto pad_drop;
+			}
+
+			VIONA_PROBE3(rx_pad_short, viona_vring_t *, ring,
+			    mblk_t *, mp, size_t, pad_size);
+			VIONA_RING_STAT_INCR(ring, rx_pad_short);
+			zero_mp->b_wptr += pad_size;
+			bzero(zero_mp->b_rptr, pad_size);
+			linkb(mp, zero_mp);
+			size += pad_size;
 		}
 
 		if (do_merge) {
@@ -1769,12 +2095,16 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 
 		/*
 		 * The VLAN padding mblk is meant for continual reuse, so
-		 * remove it from the chain to prevent it from being freed
+		 * remove it from the chain to prevent it from being freed.
+		 *
+		 * Custom allocated padding does not require this treatment and
+		 * is freed normally.
 		 */
 		if (pad != NULL) {
 			pad->b_cont = NULL;
 		}
 
+pad_drop:
 		if (err != 0) {
 			*mpdrop_prevp = mp;
 			mpdrop_prevp = &mp->b_next;
@@ -1861,13 +2191,37 @@ viona_desb_release(viona_desb_t *dp)
 	mutex_exit(&ring->vr_lock);
 }
 
+static int
+viona_mb_get_uint8(mblk_t *mp, off_t off, uint8_t *out)
+{
+	size_t mpsize;
+	uint8_t *bp;
+
+	mpsize = msgsize(mp);
+	if (off + sizeof (uint8_t) > mpsize)
+		return (-1);
+
+	mpsize = MBLKL(mp);
+	while (off >= mpsize) {
+		mp = mp->b_cont;
+		off -= mpsize;
+		mpsize = MBLKL(mp);
+	}
+
+	bp = mp->b_rptr + off;
+	*out = *bp;
+	return (0);
+}
+
 static boolean_t
-viona_tx_csum(viona_link_t *link, const struct virtio_net_hdr *hdr,
+viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
     mblk_t *mp, uint32_t len)
 {
+	viona_link_t *link = ring->vr_link;
 	const struct ether_header *eth;
 	uint_t eth_len = sizeof (struct ether_header);
 	ushort_t ftype;
+	uint8_t ipproto = IPPROTO_NONE; /* NONE is not exactly right, but ok */
 
 	eth = (const struct ether_header *)mp->b_rptr;
 	if (MBLKL(mp) < sizeof (*eth)) {
@@ -1885,11 +2239,22 @@ viona_tx_csum(viona_link_t *link, const struct virtio_net_hdr *hdr,
 		ftype = ntohs(veth->ether_type);
 	}
 
+	if (ftype == ETHERTYPE_IP) {
+		const size_t off = offsetof(ipha_t, ipha_protocol) + eth_len;
+
+		(void) viona_mb_get_uint8(mp, off, &ipproto);
+	} else if (ftype == ETHERTYPE_IPV6) {
+		const size_t off = offsetof(ip6_t, ip6_nxt) + eth_len;
+
+		(void) viona_mb_get_uint8(mp, off, &ipproto);
+	}
+
 	/*
 	 * Partial checksum support from the NIC is ideal, since it most
 	 * closely maps to the interface defined by virtio.
 	 */
-	if ((link->l_cap_csum & HCKSUM_INET_PARTIAL) != 0) {
+	if ((link->l_cap_csum & HCKSUM_INET_PARTIAL) != 0 &&
+	    (ipproto == IPPROTO_TCP || ipproto == IPPROTO_UDP)) {
 		uint_t start, stuff, end;
 
 		/*
@@ -1910,27 +2275,32 @@ viona_tx_csum(viona_link_t *link, const struct virtio_net_hdr *hdr,
 	 * checksum will need to calculated inline.
 	 */
 	if (ftype == ETHERTYPE_IP) {
-		if ((link->l_cap_csum & HCKSUM_INET_FULL_V4) != 0) {
+		if ((link->l_cap_csum & HCKSUM_INET_FULL_V4) != 0 &&
+		    (ipproto == IPPROTO_TCP || ipproto == IPPROTO_UDP)) {
 			mac_hcksum_set(mp, 0, 0, 0, 0, HCK_FULLCKSUM);
 			return (B_TRUE);
 		}
 
 		/* XXX: Implement manual fallback checksumming? */
 		VIONA_PROBE2(fail_hcksum, viona_link_t *, link, mblk_t *, mp);
+		VIONA_RING_STAT_INCR(ring, fail_hcksum);
 		return (B_FALSE);
 	} else if (ftype == ETHERTYPE_IPV6) {
-		if ((link->l_cap_csum & HCKSUM_INET_FULL_V6) != 0) {
+		if ((link->l_cap_csum & HCKSUM_INET_FULL_V6) != 0 &&
+		    (ipproto == IPPROTO_TCP || ipproto == IPPROTO_UDP)) {
 			mac_hcksum_set(mp, 0, 0, 0, 0, HCK_FULLCKSUM);
 			return (B_TRUE);
 		}
 
 		/* XXX: Implement manual fallback checksumming? */
 		VIONA_PROBE2(fail_hcksum6, viona_link_t *, link, mblk_t *, mp);
+		VIONA_RING_STAT_INCR(ring, fail_hcksum6);
 		return (B_FALSE);
 	}
 
 	/* Cannot even emulate hcksum for unrecognized protocols */
 	VIONA_PROBE2(fail_hcksum_proto, viona_link_t *, link, mblk_t *, mp);
+	VIONA_RING_STAT_INCR(ring, fail_hcksum_proto);
 	return (B_FALSE);
 }
 
@@ -1951,6 +2321,7 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
 	if (n <= 0) {
 		VIONA_PROBE1(tx_absent, viona_vring_t *, ring);
+		VIONA_RING_STAT_INCR(ring, tx_absent);
 		return;
 	}
 
@@ -2010,7 +2381,7 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 	/* Request hardware checksumming, if necessary */
 	if ((link->l_features & VIRTIO_NET_F_CSUM) != 0 &&
 	    (hdr->vrh_flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) != 0) {
-		if (!viona_tx_csum(link, hdr, mp_head, len - iov[0].iov_len)) {
+		if (!viona_tx_csum(ring, hdr, mp_head, len - iov[0].iov_len)) {
 			goto drop_fail;
 		}
 	}

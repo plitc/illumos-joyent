@@ -397,6 +397,8 @@ static boolean_t
 bootfs_name_valid(const char *pool, char *bootfs)
 {
 	int len = strlen(pool);
+	if (bootfs[0] == '\0')
+		return (B_TRUE);
 
 	if (!zfs_name_valid(bootfs, ZFS_TYPE_FILESYSTEM|ZFS_TYPE_SNAPSHOT))
 		return (B_FALSE);
@@ -550,8 +552,7 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
 			 * bootfs property value has to be a dataset name and
 			 * the dataset has to be in the same pool as it sets to.
 			 */
-			if (strval[0] != '\0' && !bootfs_name_valid(poolname,
-			    strval)) {
+			if (!bootfs_name_valid(poolname, strval)) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "'%s' "
 				    "is an invalid name"), strval);
 				(void) zfs_error(hdl, EZFS_INVALIDNAME, errbuf);
@@ -1715,7 +1716,7 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
     nvlist_t *props, int flags)
 {
 	zfs_cmd_t zc = { 0 };
-	zpool_rewind_policy_t policy;
+	zpool_load_policy_t policy;
 	nvlist_t *nv = NULL;
 	nvlist_t *nvinfo = NULL;
 	nvlist_t *missing = NULL;
@@ -1787,7 +1788,7 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
 
 	zcmd_free_nvlists(&zc);
 
-	zpool_get_rewind_policy(config, &policy);
+	zpool_get_load_policy(config, &policy);
 
 	if (error) {
 		char desc[1024];
@@ -1796,7 +1797,7 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
 		 * Dry-run failed, but we print out what success
 		 * looks like if we found a best txg
 		 */
-		if (policy.zrp_request & ZPOOL_TRY_REWIND) {
+		if (policy.zlp_rewind & ZPOOL_TRY_REWIND) {
 			zpool_rewind_exclaim(hdl, newname ? origname : thename,
 			    B_TRUE, nv);
 			nvlist_free(nv);
@@ -1889,10 +1890,10 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
 			ret = -1;
 		else if (zhp != NULL)
 			zpool_close(zhp);
-		if (policy.zrp_request &
+		if (policy.zlp_rewind &
 		    (ZPOOL_DO_REWIND | ZPOOL_TRY_REWIND)) {
 			zpool_rewind_exclaim(hdl, newname ? origname : thename,
-			    ((policy.zrp_request & ZPOOL_TRY_REWIND) != 0), nv);
+			    ((policy.zlp_rewind & ZPOOL_TRY_REWIND) != 0), nv);
 		}
 		nvlist_free(nv);
 		return (0);
@@ -1968,6 +1969,100 @@ zpool_scan(zpool_handle_t *zhp, pool_scan_func_t func, pool_scrub_cmd_t cmd)
 	} else {
 		return (zpool_standard_error(hdl, err, msg));
 	}
+}
+
+static int
+xlate_init_err(int err)
+{
+	switch (err) {
+	case ENODEV:
+		return (EZFS_NODEVICE);
+	case EINVAL:
+	case EROFS:
+		return (EZFS_BADDEV);
+	case EBUSY:
+		return (EZFS_INITIALIZING);
+	case ESRCH:
+		return (EZFS_NO_INITIALIZE);
+	}
+	return (err);
+}
+
+/*
+ * Begin, suspend, or cancel the initialization (initializing of all free
+ * blocks) for the given vdevs in the given pool.
+ */
+int
+zpool_initialize(zpool_handle_t *zhp, pool_initialize_func_t cmd_type,
+    nvlist_t *vds)
+{
+	char msg[1024];
+	libzfs_handle_t *hdl = zhp->zpool_hdl;
+
+	nvlist_t *errlist;
+
+	/* translate vdev names to guids */
+	nvlist_t *vdev_guids = fnvlist_alloc();
+	nvlist_t *guids_to_paths = fnvlist_alloc();
+	boolean_t spare, cache;
+	nvlist_t *tgt;
+	nvpair_t *elem;
+
+	for (elem = nvlist_next_nvpair(vds, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(vds, elem)) {
+		char *vd_path = nvpair_name(elem);
+		tgt = zpool_find_vdev(zhp, vd_path, &spare, &cache, NULL);
+
+		if ((tgt == NULL) || cache || spare) {
+			(void) snprintf(msg, sizeof (msg),
+			    dgettext(TEXT_DOMAIN, "cannot initialize '%s'"),
+			    vd_path);
+			int err = (tgt == NULL) ? EZFS_NODEVICE :
+			    (spare ? EZFS_ISSPARE : EZFS_ISL2CACHE);
+			fnvlist_free(vdev_guids);
+			fnvlist_free(guids_to_paths);
+			return (zfs_error(hdl, err, msg));
+		}
+
+		uint64_t guid = fnvlist_lookup_uint64(tgt, ZPOOL_CONFIG_GUID);
+		fnvlist_add_uint64(vdev_guids, vd_path, guid);
+
+		(void) snprintf(msg, sizeof (msg), "%llu", guid);
+		fnvlist_add_string(guids_to_paths, msg, vd_path);
+	}
+
+	int err = lzc_initialize(zhp->zpool_name, cmd_type, vdev_guids,
+	    &errlist);
+	fnvlist_free(vdev_guids);
+
+	if (err == 0) {
+		fnvlist_free(guids_to_paths);
+		return (0);
+	}
+
+	nvlist_t *vd_errlist = NULL;
+	if (errlist != NULL) {
+		vd_errlist = fnvlist_lookup_nvlist(errlist,
+		    ZPOOL_INITIALIZE_VDEVS);
+	}
+
+	(void) snprintf(msg, sizeof (msg),
+	    dgettext(TEXT_DOMAIN, "operation failed"));
+
+	for (elem = nvlist_next_nvpair(vd_errlist, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(vd_errlist, elem)) {
+		int64_t vd_error = xlate_init_err(fnvpair_value_int64(elem));
+		char *path = fnvlist_lookup_string(guids_to_paths,
+		    nvpair_name(elem));
+		(void) zfs_error_fmt(hdl, vd_error, "cannot initialize '%s'",
+		    path);
+	}
+
+	fnvlist_free(guids_to_paths);
+	if (vd_errlist != NULL)
+		return (-1);
+
+	return (zpool_standard_error(hdl, err, msg));
 }
 
 /*
@@ -2808,7 +2903,7 @@ zpool_vdev_attach(zpool_handle_t *zhp,
 
 	case EBUSY:
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "%s is busy, "
-		    "or pool has removing/removed vdevs"),
+		    "or device removal is in progress"),
 		    new_disk);
 		(void) zfs_error(hdl, EZFS_BADDEV, msg);
 		break;
@@ -3269,7 +3364,7 @@ zpool_clear(zpool_handle_t *zhp, const char *path, nvlist_t *rewindnvl)
 	zfs_cmd_t zc = { 0 };
 	char msg[1024];
 	nvlist_t *tgt;
-	zpool_rewind_policy_t policy;
+	zpool_load_policy_t policy;
 	boolean_t avail_spare, l2cache;
 	libzfs_handle_t *hdl = zhp->zpool_hdl;
 	nvlist_t *nvi = NULL;
@@ -3301,8 +3396,8 @@ zpool_clear(zpool_handle_t *zhp, const char *path, nvlist_t *rewindnvl)
 		    &zc.zc_guid) == 0);
 	}
 
-	zpool_get_rewind_policy(rewindnvl, &policy);
-	zc.zc_cookie = policy.zrp_request;
+	zpool_get_load_policy(rewindnvl, &policy);
+	zc.zc_cookie = policy.zlp_rewind;
 
 	if (zcmd_alloc_dst_nvlist(hdl, &zc, zhp->zpool_config_size * 2) != 0)
 		return (-1);
@@ -3318,13 +3413,13 @@ zpool_clear(zpool_handle_t *zhp, const char *path, nvlist_t *rewindnvl)
 		}
 	}
 
-	if (!error || ((policy.zrp_request & ZPOOL_TRY_REWIND) &&
+	if (!error || ((policy.zlp_rewind & ZPOOL_TRY_REWIND) &&
 	    errno != EPERM && errno != EACCES)) {
-		if (policy.zrp_request &
+		if (policy.zlp_rewind &
 		    (ZPOOL_DO_REWIND | ZPOOL_TRY_REWIND)) {
 			(void) zcmd_read_dst_nvlist(hdl, &zc, &nvi);
 			zpool_rewind_exclaim(hdl, zc.zc_name,
-			    ((policy.zrp_request & ZPOOL_TRY_REWIND) != 0),
+			    ((policy.zlp_rewind & ZPOOL_TRY_REWIND) != 0),
 			    nvi);
 			nvlist_free(nvi);
 		}

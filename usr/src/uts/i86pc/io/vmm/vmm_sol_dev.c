@@ -29,6 +29,8 @@
 #include <sys/id_space.h>
 #include <sys/fs/sdev_plugin.h>
 
+#include <sys/kernel.h>
+
 #include <sys/vmm.h>
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_dev.h>
@@ -77,18 +79,6 @@ static sdev_plugin_hdl_t vmm_sdev_hdl;
 /* From uts/i86pc/io/vmm/intel/vmx.c */
 extern int vmx_x86_supported(char **);
 
-/*
- * vmm trace ring
- */
-int	vmm_dmsg_ring_size = VMM_DMSG_RING_SIZE;
-static	vmm_trace_rbuf_t *vmm_debug_rbuf;
-static	vmm_trace_dmsg_t *vmm_trace_dmsg_alloc(void);
-static	void vmm_trace_dmsg_free(void);
-static	void vmm_trace_rbuf_alloc(void);
-#if notyet
-static	void vmm_trace_rbuf_free(void);
-#endif
-
 /* Holds and hooks from drivers external to vmm */
 struct vmm_hold {
 	list_node_t	vmh_node;
@@ -98,169 +88,6 @@ struct vmm_hold {
 };
 
 static int vmm_drv_block_hook(vmm_softc_t *, boolean_t);
-
-/*
- * This routine is used to manage debug messages
- * on ring buffer.
- */
-static vmm_trace_dmsg_t *
-vmm_trace_dmsg_alloc(void)
-{
-	vmm_trace_dmsg_t *dmsg_alloc, *dmsg = vmm_debug_rbuf->dmsgp;
-
-	if (vmm_debug_rbuf->looped == TRUE) {
-		vmm_debug_rbuf->dmsgp = dmsg->next;
-		return (vmm_debug_rbuf->dmsgp);
-	}
-
-	/*
-	 * If we're looping for the first time,
-	 * connect the ring.
-	 */
-	if (((vmm_debug_rbuf->size + (sizeof (vmm_trace_dmsg_t))) >
-	    vmm_debug_rbuf->maxsize) && (vmm_debug_rbuf->dmsgh != NULL)) {
-		dmsg->next = vmm_debug_rbuf->dmsgh;
-		vmm_debug_rbuf->dmsgp = vmm_debug_rbuf->dmsgh;
-		vmm_debug_rbuf->looped = TRUE;
-		return (vmm_debug_rbuf->dmsgp);
-	}
-
-	/* If we've gotten this far then memory allocation is needed */
-	dmsg_alloc = kmem_zalloc(sizeof (vmm_trace_dmsg_t), KM_NOSLEEP);
-	if (dmsg_alloc == NULL) {
-		vmm_debug_rbuf->allocfailed++;
-		return (dmsg_alloc);
-	} else {
-		vmm_debug_rbuf->size += sizeof (vmm_trace_dmsg_t);
-	}
-
-	if (vmm_debug_rbuf->dmsgp != NULL) {
-		dmsg->next = dmsg_alloc;
-		vmm_debug_rbuf->dmsgp = dmsg->next;
-		return (vmm_debug_rbuf->dmsgp);
-	} else {
-		/*
-		 * We should only be here if we're initializing
-		 * the ring buffer.
-		 */
-		if (vmm_debug_rbuf->dmsgh == NULL) {
-			vmm_debug_rbuf->dmsgh = dmsg_alloc;
-		} else {
-			/* Something is wrong */
-			kmem_free(dmsg_alloc, sizeof (vmm_trace_dmsg_t));
-			return (NULL);
-		}
-
-		vmm_debug_rbuf->dmsgp = dmsg_alloc;
-		return (vmm_debug_rbuf->dmsgp);
-	}
-}
-
-/*
- * Free all messages on debug ring buffer.
- */
-static void
-vmm_trace_dmsg_free(void)
-{
-	vmm_trace_dmsg_t *dmsg_next, *dmsg = vmm_debug_rbuf->dmsgh;
-
-	while (dmsg != NULL) {
-		dmsg_next = dmsg->next;
-		kmem_free(dmsg, sizeof (vmm_trace_dmsg_t));
-
-		/*
-		 * If we've looped around the ring than we're done.
-		 */
-		if (dmsg_next == vmm_debug_rbuf->dmsgh) {
-			break;
-		} else {
-			dmsg = dmsg_next;
-		}
-	}
-}
-
-static void
-vmm_trace_rbuf_alloc(void)
-{
-	vmm_debug_rbuf = kmem_zalloc(sizeof (vmm_trace_rbuf_t), KM_SLEEP);
-
-	mutex_init(&vmm_debug_rbuf->lock, NULL, MUTEX_DRIVER, NULL);
-
-	if (vmm_dmsg_ring_size > 0) {
-		vmm_debug_rbuf->maxsize = vmm_dmsg_ring_size;
-	}
-}
-
-#if notyet
-static void
-vmm_trace_rbuf_free(void)
-{
-	vmm_trace_dmsg_free();
-	mutex_destroy(&vmm_debug_rbuf->lock);
-	kmem_free(vmm_debug_rbuf, sizeof (vmm_trace_rbuf_t));
-}
-#endif
-
-static void
-vmm_vtrace_log(const char *fmt, va_list ap)
-{
-	vmm_trace_dmsg_t *dmsg;
-
-	if (vmm_debug_rbuf == NULL) {
-		return;
-	}
-
-	/*
-	 * If max size of ring buffer is smaller than size
-	 * required for one debug message then just return
-	 * since we have no room for the debug message.
-	 */
-	if (vmm_debug_rbuf->maxsize < (sizeof (vmm_trace_dmsg_t))) {
-		return;
-	}
-
-	mutex_enter(&vmm_debug_rbuf->lock);
-
-	/* alloc or reuse on ring buffer */
-	dmsg = vmm_trace_dmsg_alloc();
-
-	if (dmsg == NULL) {
-		/* resource allocation failed */
-		mutex_exit(&vmm_debug_rbuf->lock);
-		return;
-	}
-
-	gethrestime(&dmsg->timestamp);
-
-	(void) vsnprintf(dmsg->buf, sizeof (dmsg->buf), fmt, ap);
-
-	mutex_exit(&vmm_debug_rbuf->lock);
-}
-
-void
-vmm_trace_log(const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	vmm_vtrace_log(fmt, ap);
-	va_end(ap);
-}
-
-void
-vmmdev_init(void)
-{
-	vmm_trace_rbuf_alloc();
-}
-
-int
-vmmdev_cleanup(void)
-{
-	VERIFY(list_is_empty(&vmmdev_list));
-
-	vmm_trace_dmsg_free();
-	return (0);
-}
 
 static int
 vmmdev_get_memseg(vmm_softc_t *sc, struct vm_memseg *mseg)
@@ -467,6 +294,8 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 	case VM_SET_REGISTER:
 	case VM_GET_SEGMENT_DESCRIPTOR:
 	case VM_SET_SEGMENT_DESCRIPTOR:
+	case VM_GET_REGISTER_SET:
+	case VM_SET_REGISTER_SET:
 	case VM_INJECT_EXCEPTION:
 	case VM_GET_CAPABILITY:
 	case VM_SET_CAPABILITY:
@@ -474,6 +303,7 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 	case VM_PPTDEV_MSIX:
 	case VM_SET_X2APIC_STATE:
 	case VM_GLA2GPA:
+	case VM_GLA2GPA_NOFAULT:
 	case VM_ACTIVATE_CPU:
 	case VM_SET_INTINFO:
 	case VM_GET_INTINFO:
@@ -935,6 +765,82 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		}
 		break;
 	}
+	case VM_GET_REGISTER_SET: {
+		struct vm_register_set vrs;
+		int regnums[VM_REG_LAST];
+		uint64_t regvals[VM_REG_LAST];
+
+		if (ddi_copyin(datap, &vrs, sizeof (vrs), md)) {
+			error = EFAULT;
+			break;
+		}
+		if (vrs.count > VM_REG_LAST || vrs.count == 0) {
+			error = EINVAL;
+			break;
+		}
+		if (ddi_copyin(vrs.regnums, regnums,
+		    sizeof (int) * vrs.count, md)) {
+			error = EFAULT;
+			break;
+		}
+
+		error = 0;
+		for (uint_t i = 0; i < vrs.count && error == 0; i++) {
+			if (regnums[i] < 0) {
+				error = EINVAL;
+				break;
+			}
+			error = vm_get_register(sc->vmm_vm, vcpu, regnums[i],
+			    &regvals[i]);
+		}
+		if (error == 0 && ddi_copyout(regvals, vrs.regvals,
+		    sizeof (uint64_t) * vrs.count, md)) {
+			error = EFAULT;
+		}
+		break;
+	}
+	case VM_SET_REGISTER_SET: {
+		struct vm_register_set vrs;
+		int regnums[VM_REG_LAST];
+		uint64_t regvals[VM_REG_LAST];
+
+		if (ddi_copyin(datap, &vrs, sizeof (vrs), md)) {
+			error = EFAULT;
+			break;
+		}
+		if (vrs.count > VM_REG_LAST || vrs.count == 0) {
+			error = EINVAL;
+			break;
+		}
+		if (ddi_copyin(vrs.regnums, regnums,
+		    sizeof (int) * vrs.count, md)) {
+			error = EFAULT;
+			break;
+		}
+		if (ddi_copyin(vrs.regvals, regvals,
+		    sizeof (uint64_t) * vrs.count, md)) {
+			error = EFAULT;
+			break;
+		}
+
+		error = 0;
+		for (uint_t i = 0; i < vrs.count && error == 0; i++) {
+			/*
+			 * Setting registers in a set is not atomic, since a
+			 * failure in the middle of the set will cause a
+			 * bail-out and inconsistent register state.  Callers
+			 * should be wary of this.
+			 */
+			if (regnums[i] < 0) {
+				error = EINVAL;
+				break;
+			}
+			error = vm_set_register(sc->vmm_vm, vcpu, regnums[i],
+			    regvals[i]);
+		}
+		break;
+	}
+
 	case VM_GET_CAPABILITY: {
 		struct vm_capability vmcap;
 
@@ -1034,8 +940,35 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		}
 		break;
 	}
+	case VM_GLA2GPA_NOFAULT: {
+		struct vm_gla2gpa gg;
+
+		CTASSERT(PROT_READ == VM_PROT_READ);
+		CTASSERT(PROT_WRITE == VM_PROT_WRITE);
+		CTASSERT(PROT_EXEC == VM_PROT_EXECUTE);
+
+		if (ddi_copyin(datap, &gg, sizeof (gg), md)) {
+			error = EFAULT;
+			break;
+		}
+		gg.vcpuid = vcpu;
+		error = vm_gla2gpa_nofault(sc->vmm_vm, vcpu, &gg.paging,
+		    gg.gla, gg.prot, &gg.gpa, &gg.fault);
+		if (error == 0 && ddi_copyout(&gg, datap, sizeof (gg), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	}
+
 	case VM_ACTIVATE_CPU:
 		error = vm_activate_cpu(sc->vmm_vm, vcpu);
+		break;
+	case VM_SUSPEND_CPU:
+		error = vm_suspend_cpu(sc->vmm_vm, vcpu);
+		break;
+	case VM_RESUME_CPU:
+		error = vm_resume_cpu(sc->vmm_vm, vcpu);
 		break;
 
 	case VM_GET_CPUS: {
@@ -1066,6 +999,8 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 			tempset = vm_active_cpus(sc->vmm_vm);
 		} else if (vm_cpuset.which == VM_SUSPENDED_CPUS) {
 			tempset = vm_suspended_cpus(sc->vmm_vm);
+		} else if (vm_cpuset.which == VM_DEBUG_CPUS) {
+			tempset = vm_debug_cpus(sc->vmm_vm);
 		} else {
 			error = EINVAL;
 		}
@@ -1152,6 +1087,29 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 	case VM_RESTART_INSTRUCTION:
 		error = vm_restart_instruction(sc->vmm_vm, vcpu);
 		break;
+
+	case VM_SET_TOPOLOGY: {
+		struct vm_cpu_topology topo;
+
+		if (ddi_copyin(datap, &topo, sizeof (topo), md) != 0) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_set_topology(sc->vmm_vm, topo.sockets, topo.cores,
+		    topo.threads, topo.maxcpus);
+		break;
+	}
+	case VM_GET_TOPOLOGY: {
+		struct vm_cpu_topology topo;
+
+		vm_get_topology(sc->vmm_vm, &topo.sockets, &topo.cores,
+		    &topo.threads, &topo.maxcpus);
+		if (ddi_copyout(&topo, datap, sizeof (topo), md) != 0) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	}
 
 #ifndef __FreeBSD__
 	case VM_DEVMEM_GETOFFSET: {
@@ -1945,7 +1903,6 @@ vmm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	ddi_report_dev(dip);
 
-	/* XXX: This needs updating */
 	vmm_arena_init();
 
 	vmmdev_load_failure = B_FALSE;
@@ -1982,12 +1939,6 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 
 	mutex_exit(&vmm_mtx);
 
-	/* XXX: This needs updating */
-	if (!vmm_arena_fini()) {
-		mutex_exit(&vmmdev_mtx);
-		return (DDI_FAILURE);
-	}
-
 	if (vmm_sdev_hdl != NULL && sdev_plugin_unregister(vmm_sdev_hdl) != 0) {
 		mutex_exit(&vmmdev_mtx);
 		return (DDI_FAILURE);
@@ -1998,6 +1949,8 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	ddi_remove_minor_node(dip, "ctl");
 	vmm_dip = NULL;
 	vmm_sol_glue_cleanup();
+	vmm_arena_fini();
+
 	mutex_exit(&vmmdev_mtx);
 
 	return (DDI_SUCCESS);
@@ -2050,6 +2003,8 @@ int
 _init(void)
 {
 	int	error;
+
+	sysinit();
 
 	mutex_init(&vmmdev_mtx, NULL, MUTEX_DRIVER, NULL);
 	mutex_init(&vmm_mtx, NULL, MUTEX_DRIVER, NULL);

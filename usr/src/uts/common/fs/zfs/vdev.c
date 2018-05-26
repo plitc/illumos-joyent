@@ -49,6 +49,7 @@
 #include <sys/zil.h>
 #include <sys/dsl_scan.h>
 #include <sys/abd.h>
+#include <sys/vdev_initialize.h>
 
 /*
  * Virtual device management.
@@ -71,14 +72,20 @@ static vdev_ops_t *vdev_ops_table[] = {
 /* maximum scrub/resilver I/O queue per leaf vdev */
 int zfs_scrub_limit = 10;
 
-/* maximum number of metaslabs per top-level vdev */
+/* target number of metaslabs per top-level vdev */
 int vdev_max_ms_count = 200;
 
-/* minimum amount of metaslabs per top-level vdev */
+/* minimum number of metaslabs per top-level vdev */
 int vdev_min_ms_count = 16;
 
-/* see comment in vdev_metaslab_set_size() */
+/* practical upper limit of total metaslabs per top-level vdev */
+int vdev_ms_count_limit = 1ULL << 17;
+
+/* lower limit for metaslab size (512M) */
 int vdev_default_ms_shift = 29;
+
+/* upper limit for metaslab size (256G) */
+int vdev_max_ms_shift = 38;
 
 boolean_t vdev_validate_skip = B_FALSE;
 
@@ -94,6 +101,8 @@ int vdev_dtl_sm_blksz = (1 << 12);
  * (e.g. vdev_obsolete_sm), thus we default their block size to 128K.
  */
 int vdev_standard_sm_blksz = (1 << 17);
+
+int zfs_ashift_min;
 
 /*PRINTFLIKE2*/
 void
@@ -181,6 +190,14 @@ vdev_getops(const char *type)
 			break;
 
 	return (ops);
+}
+
+/* ARGSUSED */
+void
+vdev_default_xlate(vdev_t *vd, const range_seg_t *in, range_seg_t *res)
+{
+	res->rs_start = in->rs_start;
+	res->rs_end = in->rs_end;
 }
 
 /*
@@ -453,6 +470,11 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	mutex_init(&vd->vdev_stat_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vd->vdev_probe_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vd->vdev_queue_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&vd->vdev_initialize_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&vd->vdev_initialize_io_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&vd->vdev_initialize_cv, NULL, CV_DEFAULT, NULL);
+	cv_init(&vd->vdev_initialize_io_cv, NULL, CV_DEFAULT, NULL);
+
 	for (int t = 0; t < DTL_TYPES; t++) {
 		vd->vdev_dtl[t] = range_tree_create(NULL, NULL);
 	}
@@ -644,7 +666,8 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 		    alloctype == VDEV_ALLOC_SPLIT ||
 		    alloctype == VDEV_ALLOC_ROOTPOOL);
 		vd->vdev_mg = metaslab_group_create(islog ?
-		    spa_log_class(spa) : spa_normal_class(spa), vd);
+		    spa_log_class(spa) : spa_normal_class(spa), vd,
+		    spa->spa_alloc_count);
 	}
 
 	if (vd->vdev_ops->vdev_op_leaf &&
@@ -724,6 +747,7 @@ void
 vdev_free(vdev_t *vd)
 {
 	spa_t *spa = vd->vdev_spa;
+	ASSERT3P(vd->vdev_initialize_thread, ==, NULL);
 
 	/*
 	 * vdev_free() implies closing the vdev first.  This is simpler than
@@ -742,6 +766,7 @@ vdev_free(vdev_t *vd)
 
 	ASSERT(vd->vdev_child == NULL);
 	ASSERT(vd->vdev_guid_sum == vd->vdev_guid);
+	ASSERT(vd->vdev_initialize_thread == NULL);
 
 	/*
 	 * Discard allocation state.
@@ -814,6 +839,10 @@ vdev_free(vdev_t *vd)
 	mutex_destroy(&vd->vdev_dtl_lock);
 	mutex_destroy(&vd->vdev_stat_lock);
 	mutex_destroy(&vd->vdev_probe_lock);
+	mutex_destroy(&vd->vdev_initialize_lock);
+	mutex_destroy(&vd->vdev_initialize_io_lock);
+	cv_destroy(&vd->vdev_initialize_io_cv);
+	cv_destroy(&vd->vdev_initialize_cv);
 
 	if (vd == spa->spa_root_vdev)
 		spa->spa_root_vdev = NULL;
@@ -865,6 +894,32 @@ vdev_top_transfer(vdev_t *svd, vdev_t *tvd)
 	svd->vdev_stat.vs_alloc = 0;
 	svd->vdev_stat.vs_space = 0;
 	svd->vdev_stat.vs_dspace = 0;
+
+	/*
+	 * State which may be set on a top-level vdev that's in the
+	 * process of being removed.
+	 */
+	ASSERT0(tvd->vdev_indirect_config.vic_births_object);
+	ASSERT0(tvd->vdev_indirect_config.vic_mapping_object);
+	ASSERT3U(tvd->vdev_indirect_config.vic_prev_indirect_vdev, ==, -1ULL);
+	ASSERT3P(tvd->vdev_indirect_mapping, ==, NULL);
+	ASSERT3P(tvd->vdev_indirect_births, ==, NULL);
+	ASSERT3P(tvd->vdev_obsolete_sm, ==, NULL);
+	ASSERT0(tvd->vdev_removing);
+	tvd->vdev_removing = svd->vdev_removing;
+	tvd->vdev_indirect_config = svd->vdev_indirect_config;
+	tvd->vdev_indirect_mapping = svd->vdev_indirect_mapping;
+	tvd->vdev_indirect_births = svd->vdev_indirect_births;
+	range_tree_swap(&svd->vdev_obsolete_segments,
+	    &tvd->vdev_obsolete_segments);
+	tvd->vdev_obsolete_sm = svd->vdev_obsolete_sm;
+	svd->vdev_indirect_config.vic_mapping_object = 0;
+	svd->vdev_indirect_config.vic_births_object = 0;
+	svd->vdev_indirect_config.vic_prev_indirect_vdev = -1ULL;
+	svd->vdev_indirect_mapping = NULL;
+	svd->vdev_indirect_births = NULL;
+	svd->vdev_obsolete_sm = NULL;
+	svd->vdev_removing = 0;
 
 	for (t = 0; t < TXG_SIZE; t++) {
 		while ((msp = txg_list_remove(&svd->vdev_ms_list, t)) != NULL)
@@ -1013,7 +1068,6 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 
 	vd->vdev_ms = mspp;
 	vd->vdev_ms_count = newc;
-
 	for (m = oldc; m < newc; m++) {
 		uint64_t object = 0;
 
@@ -1465,6 +1519,7 @@ vdev_open(vdev_t *vd)
 		vd->vdev_asize = asize;
 		vd->vdev_max_asize = max_asize;
 		vd->vdev_ashift = MAX(ashift, vd->vdev_ashift);
+		vd->vdev_ashift = MAX(zfs_ashift_min, vd->vdev_ashift);
 	} else {
 		/*
 		 * Detect if the alignment requirement has increased.
@@ -1573,8 +1628,11 @@ vdev_validate(vdev_t *vd)
 	/*
 	 * If we are performing an extreme rewind, we allow for a label that
 	 * was modified at a point after the current txg.
+	 * If config lock is not held do not check for the txg. spa_sync could
+	 * be updating the vdev's label before updating spa_last_synced_txg.
 	 */
-	if (spa->spa_extreme_rewind || spa_last_synced_txg(spa) == 0)
+	if (spa->spa_extreme_rewind || spa_last_synced_txg(spa) == 0 ||
+	    spa_config_held(spa, SCL_CONFIG, RW_WRITER) != SCL_CONFIG)
 		txg = UINT64_MAX;
 	else
 		txg = spa_last_synced_txg(spa);
@@ -1582,7 +1640,8 @@ vdev_validate(vdev_t *vd)
 	if ((label = vdev_label_read_config(vd, txg)) == NULL) {
 		vdev_set_state(vd, B_TRUE, VDEV_STATE_CANT_OPEN,
 		    VDEV_AUX_BAD_LABEL);
-		vdev_dbgmsg(vd, "vdev_validate: failed reading config");
+		vdev_dbgmsg(vd, "vdev_validate: failed reading config for "
+		    "txg %llu", (u_longlong_t)txg);
 		return (0);
 	}
 
@@ -1975,34 +2034,53 @@ void
 vdev_metaslab_set_size(vdev_t *vd)
 {
 	uint64_t asize = vd->vdev_asize;
-	uint64_t ms_shift = 0;
+	uint64_t ms_count = asize >> vdev_default_ms_shift;
+	uint64_t ms_shift;
 
 	/*
-	 * For vdevs that are bigger than 8G the metaslab size varies in
-	 * a way that the number of metaslabs increases in powers of two,
-	 * linearly in terms of vdev_asize, starting from 16 metaslabs.
-	 * So for vdev_asize of 8G we get 16 metaslabs, for 16G, we get 32,
-	 * and so on, until we hit the maximum metaslab count limit
-	 * [vdev_max_ms_count] from which point the metaslab count stays
-	 * the same.
+	 * There are two dimensions to the metaslab sizing calculation:
+	 * the size of the metaslab and the count of metaslabs per vdev.
+	 * In general, we aim for vdev_max_ms_count (200) metaslabs. The
+	 * range of the dimensions are as follows:
+	 *
+	 *	2^29 <= ms_size  <= 2^38
+	 *	  16 <= ms_count <= 131,072
+	 *
+	 * On the lower end of vdev sizes, we aim for metaslabs sizes of
+	 * at least 512MB (2^29) to minimize fragmentation effects when
+	 * testing with smaller devices.  However, the count constraint
+	 * of at least 16 metaslabs will override this minimum size goal.
+	 *
+	 * On the upper end of vdev sizes, we aim for a maximum metaslab
+	 * size of 256GB.  However, we will cap the total count to 2^17
+	 * metaslabs to keep our memory footprint in check.
+	 *
+	 * The net effect of applying above constrains is summarized below.
+	 *
+	 *	vdev size	metaslab count
+	 *	-------------|-----------------
+	 *	< 8GB		~16
+	 *	8GB - 100GB	one per 512MB
+	 *	100GB - 50TB	~200
+	 *	50TB - 32PB	one per 256GB
+	 *	> 32PB		~131,072
+	 *	-------------------------------
 	 */
-	ms_shift = vdev_default_ms_shift;
 
-	if ((asize >> ms_shift) < vdev_min_ms_count) {
-		/*
-		 * For devices that are less than 8G we want to have
-		 * exactly 16 metaslabs. We don't want less as integer
-		 * division rounds down, so less metaslabs mean more
-		 * wasted space. We don't want more as these vdevs are
-		 * small and in the likely event that we are running
-		 * out of space, the SPA will have a hard time finding
-		 * space due to fragmentation.
-		 */
+	if (ms_count < vdev_min_ms_count)
 		ms_shift = highbit64(asize / vdev_min_ms_count);
-		ms_shift = MAX(ms_shift, SPA_MAXBLOCKSHIFT);
-
-	} else if ((asize >> ms_shift) > vdev_max_ms_count) {
+	else if (ms_count > vdev_max_ms_count)
 		ms_shift = highbit64(asize / vdev_max_ms_count);
+	else
+		ms_shift = vdev_default_ms_shift;
+
+	if (ms_shift < SPA_MAXBLOCKSHIFT) {
+		ms_shift = SPA_MAXBLOCKSHIFT;
+	} else if (ms_shift > vdev_max_ms_shift) {
+		ms_shift = vdev_max_ms_shift;
+		/* cap the total count to constrain memory footprint */
+		if ((asize >> ms_shift) > vdev_ms_count_limit)
+			ms_shift = highbit64(asize / vdev_ms_count_limit);
 	}
 
 	vd->vdev_ms_shift = ms_shift;
@@ -2455,7 +2533,7 @@ vdev_dtl_sync(vdev_t *vd, uint64_t txg)
 	mutex_exit(&vd->vdev_dtl_lock);
 
 	space_map_truncate(vd->vdev_dtl_sm, vdev_dtl_sm_blksz, tx);
-	space_map_write(vd->vdev_dtl_sm, rtsync, SM_ALLOC, tx);
+	space_map_write(vd->vdev_dtl_sm, rtsync, SM_ALLOC, SM_NO_VDEVID, tx);
 	range_tree_vacate(rtsync, NULL, NULL);
 
 	range_tree_destroy(rtsync);
@@ -2811,7 +2889,8 @@ vdev_sync_done(vdev_t *vd, uint64_t txg)
 
 	ASSERT(vdev_is_concrete(vd));
 
-	while (msp = txg_list_remove(&vd->vdev_ms_list, TXG_CLEAN(txg)))
+	while ((msp = txg_list_remove(&vd->vdev_ms_list, TXG_CLEAN(txg)))
+	    != NULL)
 		metaslab_sync_done(msp, txg);
 
 	if (reassess)
@@ -3036,6 +3115,15 @@ vdev_online(spa_t *spa, uint64_t guid, uint64_t flags, vdev_state_t *newstate)
 			return (spa_vdev_state_exit(spa, vd, ENOTSUP));
 		spa_async_request(spa, SPA_ASYNC_CONFIG_UPDATE);
 	}
+
+	/* Restart initializing if necessary */
+	mutex_enter(&vd->vdev_initialize_lock);
+	if (vdev_writeable(vd) &&
+	    vd->vdev_initialize_thread == NULL &&
+	    vd->vdev_initialize_state == VDEV_INITIALIZE_ACTIVE) {
+		(void) vdev_initialize(vd);
+	}
+	mutex_exit(&vd->vdev_initialize_lock);
 
 	if (wasoffline ||
 	    (oldstate < VDEV_STATE_DEGRADED &&
@@ -3331,8 +3419,18 @@ vdev_get_stats(vdev_t *vd, vdev_stat_t *vs)
 	vs->vs_timestamp = gethrtime() - vs->vs_timestamp;
 	vs->vs_state = vd->vdev_state;
 	vs->vs_rsize = vdev_get_min_asize(vd);
-	if (vd->vdev_ops->vdev_op_leaf)
+	if (vd->vdev_ops->vdev_op_leaf) {
 		vs->vs_rsize += VDEV_LABEL_START_SIZE + VDEV_LABEL_END_SIZE;
+		/*
+		 * Report intializing progress. Since we don't have the
+		 * initializing locks held, this is only an estimate (although a
+		 * fairly accurate one).
+		 */
+		vs->vs_initialize_bytes_done = vd->vdev_initialize_bytes_done;
+		vs->vs_initialize_bytes_est = vd->vdev_initialize_bytes_est;
+		vs->vs_initialize_state = vd->vdev_initialize_state;
+		vs->vs_initialize_action_time = vd->vdev_initialize_action_time;
+	}
 	/*
 	 * Report expandable space on top-level, non-auxillary devices only.
 	 * The expandable space is reported in terms of metaslab sized units

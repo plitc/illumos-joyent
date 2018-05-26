@@ -26,7 +26,7 @@
 .\" Copyright (c) 2017 Datto Inc.
 .\" Copyright (c) 2017 George Melikov. All Rights Reserved.
 .\"
-.Dd December 6, 2017
+.Dd April 27, 2018
 .Dt ZPOOL 1M
 .Os
 .Sh NAME
@@ -105,6 +105,11 @@
 .Op Fl R Ar root
 .Ar pool Ns | Ns Ar id
 .Op Ar newpool
+.Nm
+.Cm initialize
+.Op Fl cs
+.Ar pool
+.Op Ar device Ns ...
 .Nm
 .Cm iostat
 .Op Fl v
@@ -1333,6 +1338,32 @@ to fully rewind.
 .El
 .It Xo
 .Nm
+.Cm initialize
+.Op Fl cs
+.Ar pool
+.Op Ar device Ns ...
+.Xc
+Begins initializing by writing to all unallocated regions on the specified
+devices, or all eligible devices in the pool if no individual devices are
+specified.
+Only leaf data or log devices may be initialized.
+.Bl -tag -width Ds
+.It Fl c, -cancel
+Cancel initializing on the specified devices, or all eligible devices if none
+are specified.
+If one or more target devices are invalid or are not currently being
+initialized, the command will fail and no cancellation will occur on any device.
+.It Fl s -suspend
+Suspend initializing on the specified devices, or all eligible devices if none
+are specified.
+If one or more target devices are invalid or are not currently being
+initialized, the command will fail and no suspension will occur on any device.
+Initializing can then be resumed by running
+.Nm zpool Cm initialize
+with no flags on the relevant target devices.
+.El
+.It Xo
+.Nm
 .Cm iostat
 .Op Fl v
 .Op Fl T Sy u Ns | Ns Sy d
@@ -1419,7 +1450,7 @@ See the
 .Sx Properties
 section for a list of valid properties.
 The default list is
-.Cm name , size , allocated , free , expandsize , fragmentation , capacity ,
+.Cm name , size , allocated , free , checkpoint, expandsize , fragmentation , capacity ,
 .Cm dedupratio , health , altroot .
 .It Fl p
 Display numbers in parsable

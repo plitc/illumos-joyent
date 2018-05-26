@@ -3311,7 +3311,6 @@ f usr/include/smbsrv/alloc.h 0644 root bin
 f usr/include/smbsrv/cp_unicode.h 0644 root bin
 f usr/include/smbsrv/cp_usascii.h 0644 root bin
 f usr/include/smbsrv/hash_table.h 0644 root bin
-f usr/include/smbsrv/libmlrpc.h 0644 root bin
 f usr/include/smbsrv/libmlsvc.h 0644 root bin
 f usr/include/smbsrv/libsmb.h 0644 root bin
 f usr/include/smbsrv/libsmbns.h 0644 root bin
@@ -3325,17 +3324,14 @@ f usr/include/smbsrv/ndl/eventlog.ndl 0644 root bin
 f usr/include/smbsrv/ndl/llsrpc.ndl 0644 root bin
 f usr/include/smbsrv/ndl/lsarpc.ndl 0644 root bin
 f usr/include/smbsrv/ndl/msgsvc.ndl 0644 root bin
-f usr/include/smbsrv/ndl/ndrtypes.ndl 0644 root bin
 f usr/include/smbsrv/ndl/netdfs.ndl 0644 root bin
 f usr/include/smbsrv/ndl/netlogon.ndl 0644 root bin
-f usr/include/smbsrv/ndl/rpcpdu.ndl 0644 root bin
 f usr/include/smbsrv/ndl/samrpc.ndl 0644 root bin
 f usr/include/smbsrv/ndl/security.ndl 0644 root bin
 f usr/include/smbsrv/ndl/spoolss.ndl 0644 root bin
 f usr/include/smbsrv/ndl/srvsvc.ndl 0644 root bin
 f usr/include/smbsrv/ndl/svcctl.ndl 0644 root bin
 f usr/include/smbsrv/ndl/winreg.ndl 0644 root bin
-f usr/include/smbsrv/ndr.h 0644 root bin
 f usr/include/smbsrv/netbios.h 0644 root bin
 f usr/include/smbsrv/netrauth.h 0644 root bin
 f usr/include/smbsrv/nmpipes.h 0644 root bin
@@ -3363,7 +3359,6 @@ f usr/include/smbsrv/string.h 0644 root bin
 f usr/include/smbsrv/svrapi.h 0644 root bin
 f usr/include/smbsrv/winioctl.h 0644 root bin
 f usr/include/smbsrv/winsvc.h 0644 root bin
-f usr/include/smbsrv/wintypes.h 0644 root bin
 f usr/include/smhbaapi.h 0644 root bin
 f usr/include/spawn.h 0644 root bin
 f usr/include/stack_unwind.h 0644 root bin
@@ -4705,6 +4700,8 @@ f usr/lib/adb/adbgen1 0755 root sys
 f usr/lib/adb/adbgen3 0755 root sys
 f usr/lib/adb/adbgen4 0755 root sys
 f usr/lib/adb/adbsub.o 0644 root sys
+d usr/lib/ahci 0755 root sys
+f usr/lib/ahci/ahciem 0555 root bin
 d usr/lib/adb/amd64 0755 root sys
 f usr/lib/adb/amd64/adbsub.o 0644 root sys
 d usr/lib/amd64 0755 root bin
@@ -4931,6 +4928,7 @@ f usr/lib/amd64/libpool.so.1 0755 root bin
 s usr/lib/amd64/libpool.so=libpool.so.1
 s usr/lib/amd64/libposix4.so.1=../../../lib/amd64/librt.so.1
 s usr/lib/amd64/libposix4.so=../../../lib/amd64/librt.so.1
+f usr/lib/amd64/libppt.so.1 0755 root bin
 s usr/lib/amd64/libproc.so.1=../../../lib/amd64/libproc.so.1
 s usr/lib/amd64/libproc.so=../../../lib/amd64/libproc.so.1
 f usr/lib/amd64/libproject.so.1 0755 root bin
@@ -5107,7 +5105,7 @@ f usr/lib/brand/bhyve/uninstall 0555 root sys
 f usr/lib/brand/bhyve/config.xml 0444 root sys
 f usr/lib/brand/bhyve/platform.xml 0444 root sys
 f usr/lib/brand/bhyve/statechange 0555 root sys
-h usr/lib/brand/bhyve/zhyve=usr/sbin/amd64/bhyve
+f usr/lib/brand/bhyve/zhyve 0555 root sys
 d usr/lib/brand/lx 0755 root bin
 s usr/lib/brand/lx/64=amd64
 d usr/lib/brand/lx/amd64 0755 root bin
@@ -6333,6 +6331,7 @@ f usr/lib/libmenu.so.1 0755 root bin
 s usr/lib/libmenu.so=libmenu.so.1
 f usr/lib/libmilter.so.1 0755 root bin
 s usr/lib/libmilter.so=libmilter.so.1
+f usr/lib/libmlrpc.so.2 0755 root bin
 s usr/lib/libmp.so.1=../../lib/libmp.so.1
 s usr/lib/libmp.so.2=../../lib/libmp.so.2
 s usr/lib/libmp.so=../../lib/libmp.so.2
@@ -6381,6 +6380,7 @@ s usr/lib/libposix4.so.1=../../lib/librt.so.1
 s usr/lib/libposix4.so=../../lib/librt.so.1
 f usr/lib/libpp.so.1 0755 root bin
 s usr/lib/libpp.so=libpp.so.1
+f usr/lib/libppt.so.1 0755 root bin
 s usr/lib/libproc.so.1=../../lib/libproc.so.1
 s usr/lib/libproc.so=../../lib/libproc.so.1
 f usr/lib/libproject.so.1 0755 root bin
@@ -9610,7 +9610,6 @@ f usr/lib/mdb/kvm/amd64/sv.so 0555 root sys
 f usr/lib/mdb/kvm/amd64/ufs.so 0555 root sys
 f usr/lib/mdb/kvm/amd64/uhci.so 0555 root sys
 f usr/lib/mdb/kvm/amd64/usba.so 0555 root sys
-f usr/lib/mdb/kvm/amd64/vmm.so 0555 root sys
 f usr/lib/mdb/kvm/amd64/xhci.so 0555 root sys
 f usr/lib/mdb/kvm/amd64/zfs.so 0555 root sys
 d usr/lib/mdb/proc 0755 root sys
@@ -10000,15 +9999,6 @@ d usr/lib/smbfs 0755 root bin
 f usr/lib/smbfs/smbiod 0555 root bin
 f usr/lib/smbfs/smbiod-svc 0555 root bin
 d usr/lib/smbsrv 0755 root bin
-d usr/lib/smbsrv/amd64 0755 root bin
-f usr/lib/smbsrv/amd64/libmlrpc.so.1 0755 root bin
-s usr/lib/smbsrv/amd64/libmlrpc.so=libmlrpc.so.1
-f usr/lib/smbsrv/amd64/libmlsvc.so.1 0755 root bin
-s usr/lib/smbsrv/amd64/libmlsvc.so=libmlsvc.so.1
-f usr/lib/smbsrv/amd64/libsmb.so.1 0755 root bin
-s usr/lib/smbsrv/amd64/libsmb.so=libsmb.so.1
-f usr/lib/smbsrv/amd64/libsmbns.so.1 0755 root bin
-s usr/lib/smbsrv/amd64/libsmbns.so=libsmbns.so.1
 d usr/lib/smbsrv/dtrace 0755 root bin
 f usr/lib/smbsrv/dtrace/smbd-all.d 0555 root bin
 f usr/lib/smbsrv/dtrace/smbd-authsvc.d 0555 root bin
@@ -10017,14 +10007,9 @@ f usr/lib/smbsrv/dtrace/smbd-pipesvc.d 0555 root bin
 f usr/lib/smbsrv/dtrace/smbnode.d 0555 root bin
 f usr/lib/smbsrv/dtrace/smbsrv.d 0555 root bin
 f usr/lib/smbsrv/dtrace/smbvfs.d 0555 root bin
-f usr/lib/smbsrv/libmlrpc.so.1 0755 root bin
-s usr/lib/smbsrv/libmlrpc.so=libmlrpc.so.1
 f usr/lib/smbsrv/libmlsvc.so.1 0755 root bin
-s usr/lib/smbsrv/libmlsvc.so=libmlsvc.so.1
 f usr/lib/smbsrv/libsmb.so.1 0755 root bin
-s usr/lib/smbsrv/libsmb.so=libsmb.so.1
 f usr/lib/smbsrv/libsmbns.so.1 0755 root bin
-s usr/lib/smbsrv/libsmbns.so=libsmbns.so.1
 f usr/lib/smbsrv/smbd 0755 root bin
 d usr/lib/smedia 0755 root bin
 d usr/lib/smedia/amd64 0755 root bin
@@ -10170,14 +10155,25 @@ d usr/platform/i86pc/lib/fm/topo 0755 root sys
 d usr/platform/i86pc/lib/fm/topo/maps 0755 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-1101-disk-hc-topology.xml 0444 root sys
 s usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-3101-hc-topology.xml=./SSG-2028R-ACR24L-hc-topology.xml
-s usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-3102-hc-topology.xml=./SSG-2028R-ACR24L-hc-topology.xml 
+s usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-3102-hc-topology.xml=./SSG-2028R-ACR24L-hc-topology.xml
+f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-3301-hc-topology.xml 0444 root sys
+s usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-3302-hc-topology.xml=./Joyent-Compute-Platform-3301-hc-topology.xml
+f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-330x-chassis-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Compute-Platform-330x-fan-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Storage-Platform-7001-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Storage-Platform-7001-chassis-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/Joyent-Storage-Platform-7001-slot-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-6049P-E1CR36L-chassis-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-6049P-E1CR36L-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-6049P-E1CR36L-slot-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/SSG-2028R-ACR24L-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/SSG-2028R-ACR24L-chassis-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/SSG-2028R-ACR24L-disk-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/SSG-2028R-ACR24L-slot-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-2029P-ACR24L-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-2029P-ACR24L-chassis-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-2029P-ACR24L-disk-hc-topology.xml 0444 root sys
+f usr/platform/i86pc/lib/fm/topo/maps/SSG-2029P-ACR24L-slot-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/chassis-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/chip-hc-topology.xml 0444 root sys
 f usr/platform/i86pc/lib/fm/topo/maps/fan-hc-topology.xml 0444 root sys
@@ -10273,8 +10269,6 @@ f usr/sbin/acpixtract 0555 root bin
 f usr/sbin/add_drv 0555 root bin
 f usr/sbin/allocate 4555 root bin
 d usr/sbin/amd64 0755 root bin
-f usr/sbin/amd64/bhyve 0555 root sys
-f usr/sbin/amd64/bhyvectl 0555 root sys
 f usr/sbin/amd64/dtrace 0555 root bin
 f usr/sbin/amd64/intrstat 0555 root bin
 f usr/sbin/amd64/ipf 0555 root bin
@@ -10296,8 +10290,8 @@ f usr/sbin/auditstat 0555 root bin
 h usr/sbin/audlinks=usr/sbin/devfsadm
 s usr/sbin/automount=../lib/fs/autofs/automount
 s usr/sbin/autopush=../../sbin/autopush
-h usr/sbin/bhyve=usr/lib/isaexec
-h usr/sbin/bhyvectl=usr/lib/isaexec
+f usr/sbin/bhyve 0555 root sys
+f usr/sbin/bhyvectl 0555 root sys
 f usr/sbin/cfgadm 0555 root bin
 f usr/sbin/check-hostname 0555 root mail
 f usr/sbin/check-permissions 0555 root mail
@@ -10311,6 +10305,7 @@ f usr/sbin/consadmd 0555 root sys
 f usr/sbin/cpustat 0555 root bin
 f usr/sbin/cron 0555 root sys
 s usr/sbin/cryptoadm=../../sbin/cryptoadm
+f usr/sbin/cxgbetool 0555 root sys
 s usr/sbin/dcopy=clri
 h usr/sbin/deallocate=usr/sbin/allocate
 f usr/sbin/devfsadm 0755 root sys
@@ -10458,6 +10453,7 @@ f usr/sbin/poolbind 0555 root bin
 f usr/sbin/poolcfg 0555 root bin
 h usr/sbin/ports=usr/sbin/devfsadm
 h usr/sbin/poweroff=usr/sbin/halt
+f usr/sbin/pptadm 0555 root bin
 f usr/sbin/praudit 0555 root bin
 f usr/sbin/projadd 0555 root sys
 f usr/sbin/projdel 0555 root sys
@@ -10572,6 +10568,7 @@ d usr/sfw/bin 0755 root bin
 d usr/sfw/bin/amd64 0755 root bin
 d usr/share 0755 root sys
 d usr/share/hwdata 0755 root sys
+f usr/share/hwdata/efi.fixes 0444 root bin
 f usr/share/hwdata/pci.ids 0444 root bin
 d usr/share/lib 0755 root sys
 d usr/share/lib/dict 0755 root bin
@@ -12100,6 +12097,7 @@ f usr/share/man/man1m/poold.1m 0444 root bin
 f usr/share/man/man1m/poolstat.1m 0444 root bin
 f usr/share/man/man1m/ports.1m 0444 root bin
 s usr/share/man/man1m/poweroff.1m=halt.1m
+f usr/share/man/man1m/pptadm.1m 0444 root bin
 f usr/share/man/man1m/praudit.1m 0444 root bin
 f usr/share/man/man1m/projadd.1m 0444 root bin
 f usr/share/man/man1m/projdel.1m 0444 root bin

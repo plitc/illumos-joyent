@@ -365,6 +365,7 @@ extern int topo_fmri_getpgrp(topo_hdl_t *, nvlist_t *, const char *,
     nvlist_t **, int *);
 extern int topo_fmri_setprop(topo_hdl_t *, nvlist_t *, const char *,
     nvlist_t *, int, nvlist_t *, int *);
+extern void topo_pgroup_hcset(tnode_t *, nvlist_t *);
 
 /* Property node NVL names used in topo_prop_getprops */
 #define	TOPO_PROP_GROUP		"property-group"
@@ -417,6 +418,14 @@ void topo_sensor_state_name(uint32_t sensor_type, uint8_t state, char *buf,
 #define	TOPO_FACILITY_TYPE	"type"
 #define	TOPO_SENSOR_UNITS	"units"
 #define	TOPO_LED_MODE		"mode"
+
+#define	TOPO_PROP_THRESHOLD_LNC		"threshold-lower-non-critical"
+#define	TOPO_PROP_THRESHOLD_LCR		"threshold-lower-critical"
+#define	TOPO_PROP_THRESHOLD_LNR		"threshold-lower-non-recoverable"
+
+#define	TOPO_PROP_THRESHOLD_UNC		"threshold-upper-non-critical"
+#define	TOPO_PROP_THRESHOLD_UCR		"threshold-upper-critical"
+#define	TOPO_PROP_THRESHOLD_UNR		"threshold-upper-non-recoverable"
 
 /*
  * Sensor Classes
