@@ -310,6 +310,10 @@ static int vmx_getdesc(void *arg, int vcpu, int reg, struct seg_desc *desc);
 static int vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval);
 static int vmxctx_setreg(struct vmxctx *vmxctx, int reg, uint64_t val);
 static void vmx_inject_pir(struct vlapic *vlapic);
+static void vmx_flush_pir_prio(struct vlapic *vlapic);
+#ifndef __FreeBSD__
+static int vmx_apply_tsc_adjust(struct vmx *, int);
+#endif /* __FreeBSD__ */
 
 #ifdef KTR
 static const char *
@@ -979,15 +983,6 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 	struct vmcs *vmcs;
 	uint32_t exc_bitmap;
 
-#ifndef __FreeBSD__
-	/*
-	 * Grab an initial TSC reading to apply as an offset so the guest
-	 * TSC(s) appear to start from a zeroed value.
-	 */
-	uint64_t init_time = rdtsc();
-#endif
-
-
 	vmx = malloc(sizeof(struct vmx), M_VMX, M_WAITOK | M_ZERO);
 	if ((uintptr_t)vmx & PAGE_MASK) {
 		panic("malloc of struct vmx not aligned on %d byte boundary",
@@ -1098,15 +1093,6 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		error += vmwrite(VMCS_MSR_BITMAP, msr_bitmap_pa);
 #endif
 		error += vmwrite(VMCS_VPID, vpid[i]);
-
-#ifndef __FreeBSD__
-		/*
-		 * Record initial TSC offset.  It will be loaded into the VMCS
-		 * during each setup for VMX entry.
-		 */
-		vmx->tsc_offset[i] = (uint64_t)(-init_time);
-		VERIFY(procbased_ctls & PROCBASED_TSC_OFFSET);
-#endif
 
 		/* exception bitmap */
 		if (vcpu_trace_exceptions(vm, i))
@@ -1280,30 +1266,6 @@ vmx_invvpid(struct vmx *vmx, int vcpu, pmap_t pmap, int running)
 	}
 }
 
-#ifndef __FreeBSD__
-/*
- * Set the TSC adjustment, taking into account the offsets measured between
- * host physical CPUs.  This is required even if the guest has not set a TSC
- * offset since vCPUs inherit the TSC offset of whatever physical CPU it has
- * migrated onto.  Without this mitigation, un-synched host TSCs will convey
- * the appearance of TSC time-travel to the guest as its vCPUs migrate.
- */
-static int
-vmx_apply_tsc_adjust(struct vmx *vmx, int vcpu)
-{
-	extern hrtime_t tsc_gethrtime_tick_delta(void);
-	uint64_t host_offset = (uint64_t)tsc_gethrtime_tick_delta();
-	uint64_t guest_offset = vmx->tsc_offset[vcpu];
-	int error;
-
-	ASSERT(vmx->cap[vcpu].proc_ctls & PROCBASED_TSC_OFFSET);
-
-	error = vmwrite(VMCS_TSC_OFFSET, guest_offset + host_offset);
-
-	return (error);
-}
-#endif
-
 static void
 vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 {
@@ -1317,6 +1279,12 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 	 * trip into the critical section.
 	 */
 	vmcs_write(VMCS_HOST_IA32_SYSENTER_ESP, rdmsr(MSR_SYSENTER_ESP_MSR));
+
+	/*
+	 * Perform any needed TSC_OFFSET adjustment based on TSC_MSR writes or
+	 * migration between host CPUs with differing TSC values.
+	 */
+	VERIFY0(vmx_apply_tsc_adjust(vmx, vcpu));
 #endif
 
 	vmxstate = &vmx->state[vcpu];
@@ -1335,10 +1303,6 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 	vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
 	vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
 	vmx_invvpid(vmx, vcpu, pmap, 1);
-
-#ifndef __FreeBSD__
-	VERIFY0(vmx_apply_tsc_adjust(vmx, vcpu));
-#endif
 }
 
 /*
@@ -1390,12 +1354,12 @@ vmx_clear_nmi_window_exiting(struct vmx *vmx, int vcpu)
 	VCPU_CTR0(vmx->vm, vcpu, "Disabling NMI window exiting");
 }
 
+#ifdef __FreeBSD__
 int
 vmx_set_tsc_offset(struct vmx *vmx, int vcpu, uint64_t offset)
 {
 	int error;
 
-#ifdef __FreeBSD__
 	if ((vmx->cap[vcpu].proc_ctls & PROCBASED_TSC_OFFSET) == 0) {
 		vmx->cap[vcpu].proc_ctls |= PROCBASED_TSC_OFFSET;
 		vmcs_write(VMCS_PRI_PROC_BASED_CTLS, vmx->cap[vcpu].proc_ctls);
@@ -1403,13 +1367,35 @@ vmx_set_tsc_offset(struct vmx *vmx, int vcpu, uint64_t offset)
 	}
 
 	error = vmwrite(VMCS_TSC_OFFSET, offset);
-#else /* __FreeBSD__ */
-	vmx->tsc_offset[vcpu] = offset;
-	error = vmx_apply_tsc_adjust(vmx, vcpu);
-#endif /* __FreeBSD__ */
 
 	return (error);
 }
+#else /* __FreeBSD__ */
+/*
+ * Set the TSC adjustment, taking into account the offsets measured between
+ * host physical CPUs.  This is required even if the guest has not set a TSC
+ * offset since vCPUs inherit the TSC offset of whatever physical CPU it has
+ * migrated onto.  Without this mitigation, un-synched host TSCs will convey
+ * the appearance of TSC time-travel to the guest as its vCPUs migrate.
+ */
+static int
+vmx_apply_tsc_adjust(struct vmx *vmx, int vcpu)
+{
+	extern hrtime_t tsc_gethrtime_tick_delta(void);
+	const uint64_t target_offset = (vcpu_tsc_offset(vmx->vm, vcpu) +
+	    (uint64_t)tsc_gethrtime_tick_delta());
+	int error = 0;
+
+	ASSERT(vmx->cap[vcpu].proc_ctls & PROCBASED_TSC_OFFSET);
+
+	if (vmx->tsc_offset_active[vcpu] != target_offset) {
+		error = vmwrite(VMCS_TSC_OFFSET, target_offset);
+		vmx->tsc_offset_active[vcpu] = target_offset;
+	}
+
+	return (error);
+}
+#endif /* __FreeBSD__ */
 
 #define	NMI_BLOCKING	(VMCS_INTERRUPTIBILITY_NMI_BLOCKING |		\
 			 VMCS_INTERRUPTIBILITY_MOVSS_BLOCKING)
@@ -3106,6 +3092,10 @@ vmx_run(void *arg, int vcpu, register_t rip, pmap_t pmap,
 	if (!handled)
 		vmm_stat_incr(vm, vcpu, VMEXIT_USERSPACE, 1);
 
+	if (virtual_interrupt_delivery) {
+		vmx_flush_pir_prio(vlapic);
+	}
+
 	VCPU_CTR1(vm, vcpu, "returning from vmx_run: exitcode %d",
 	    vmexit->exitcode);
 
@@ -3590,16 +3580,19 @@ vmx_set_intr_ready(struct vlapic *vlapic, int vector, bool level)
 	 *
 	 * Those priority bits will be left unchanged, becoming effectively
 	 * stale, when the CPU delivers the posted interrupts to the guest and
-	 * clears the 'pending' bit.  This is acceptable since they are only
-	 * used to elide interrupt-is-ready wake-ups when the 'pending' bit is
-	 * not making a 0->1 transition _and_ the vCPU priority is elevated.
+	 * clears the 'pending' bit.  The presence of those stale bits is
+	 * harmless when the CPU is in guest context, since 0->1 transitions of
+	 * the 'pending' bit ensure reliable notifications.  They are cleared
+	 * by vmx_flush_pir_prio() prior to leaving vmx_run(), since accurate
+	 * priority information is necessary to prevent eliding necessary
+	 * wake-ups.
 	 *
 	 * When vmx_inject_pir() is called to inject any interrupts which were
-	 * posted while the CPU was outside VMX context, it will clear the
+	 * posted while the CPU was outside VMX context, it will also clear the
 	 * priority bitfield as part of querying the 'pending' field.
 	 */
-	old = atomic_load_acq_long(&pir_desc->pending);
-	if (atomic_cmpset_long(&pir_desc->pending, old, old|prio_mask) != 0) {
+	old = pir_desc->pending;
+	if (atomic_cmpset_long(&pir_desc->pending, old, old | prio_mask) != 0) {
 		/*
 		 * If there was no race in updating the pending field
 		 * (including the priority bitfield), then a notification is
@@ -3645,7 +3638,7 @@ vmx_pending_intr(struct vlapic *vlapic, int *vecptr)
 	vlapic_vtx = (struct vlapic_vtx *)vlapic;
 	pir_desc = vlapic_vtx->pir_desc;
 
-	pending = atomic_load_acq_long(&pir_desc->pending);
+	pending = pir_desc->pending;
 	if ((pending & PIR_MASK_PENDING) == 0) {
 		/*
 		 * While a virtual interrupt may have already been
@@ -3797,7 +3790,7 @@ vmx_inject_pir(struct vlapic *vlapic)
 	vlapic_vtx = (struct vlapic_vtx *)vlapic;
 	pir_desc = vlapic_vtx->pir_desc;
 
-	pending = atomic_swap_long(&pir_desc->pending, 0);
+	pending = atomic_readandclear_long(&pir_desc->pending);
 	if ((pending & PIR_MASK_PENDING) == 0) {
 		VCPU_CTR0(vlapic->vm, vlapic->vcpuid, "vmx_inject_pir: "
 		    "no posted interrupt pending");
@@ -3874,6 +3867,26 @@ vmx_inject_pir(struct vlapic *vlapic)
 			    intr_status_old, intr_status_new);
 		}
 	}
+}
+
+static void
+vmx_flush_pir_prio(struct vlapic *vlapic)
+{
+	struct vlapic_vtx *vlapic_vtx;
+	struct pir_desc *pir_desc;
+
+	vlapic_vtx = (struct vlapic_vtx *)vlapic;
+	pir_desc = vlapic_vtx->pir_desc;
+
+	/*
+	 * Clear all the reserved bits caching interrupt priority, leaving the
+	 * 'pending' bit, from the PIR descriptor.  Stale priority bits
+	 * representing interrupts which were posted to the guest while in the
+	 * VMX context must be cleared to ensure that priority-conditional
+	 * interrupt notification occurs properly until another VMX entry is
+	 * made.
+	 */
+	atomic_clear_long(&pir_desc->pending, ~PIR_MASK_PENDING);
 }
 
 static struct vlapic *
