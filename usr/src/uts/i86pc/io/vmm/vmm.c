@@ -276,6 +276,8 @@ static bool sysmem_mapping(struct vm *vm, struct mem_map *mm);
 static void vcpu_notify_event_locked(struct vcpu *vcpu, bool lapic_intr);
 
 #ifndef __FreeBSD__
+static void vm_clear_memseg(struct vm *, int);
+
 typedef struct vm_ioport_hook {
 	list_node_t	vmih_node;
 	uint_t		vmih_ioport;
@@ -661,6 +663,17 @@ vm_cleanup(struct vm *vm, bool destroy)
 		mm = &vm->mem_maps[i];
 		if (destroy || !sysmem_mapping(vm, mm))
 			vm_free_memmap(vm, i);
+#ifndef __FreeBSD__
+		else {
+			/*
+			 * We need to reset the IOMMU flag so this mapping can
+			 * be reused when a VM is rebooted. Since the IOMMU
+			 * domain has already been destroyed we can just reset
+			 * the flag here.
+			 */
+			mm->flags &= ~VM_MEMMAP_F_IOMMU;
+		}
+#endif
 	}
 
 	if (destroy) {
@@ -670,6 +683,15 @@ vm_cleanup(struct vm *vm, bool destroy)
 		VMSPACE_FREE(vm->vmspace);
 		vm->vmspace = NULL;
 	}
+#ifndef __FreeBSD__
+	else {
+		/*
+		 * Clear the first memory segment (low mem), old memory contents
+		 * could confuse the UEFI firmware.
+		 */
+		vm_clear_memseg(vm, 0);
+	}
+#endif
 }
 
 void
@@ -811,6 +833,22 @@ vm_get_memseg(struct vm *vm, int ident, size_t *len, bool *sysmem,
 		*objptr = seg->object;
 	return (0);
 }
+
+#ifndef __FreeBSD__
+static void
+vm_clear_memseg(struct vm *vm, int ident)
+{
+	struct mem_seg *seg;
+
+	KASSERT(ident >= 0 && ident < VM_MAX_MEMSEGS,
+	    ("%s: invalid memseg ident %d", __func__, ident));
+
+	seg = &vm->mem_segs[ident];
+
+	if (seg->object != NULL)
+		vm_object_clear(seg->object);
+}
+#endif
 
 void
 vm_free_memseg(struct vm *vm, int ident)
@@ -1997,7 +2035,6 @@ vmm_freectx(void *arg, int isexec)
 
 #endif /* __FreeBSD */
 
-
 int
 vm_run(struct vm *vm, struct vm_run *vmrun)
 {
@@ -2013,6 +2050,7 @@ vm_run(struct vm *vm, struct vm_run *vmrun)
 	pmap_t pmap;
 #ifndef	__FreeBSD__
 	vm_thread_ctx_t vtc;
+	int affinity_type = CPU_CURRENT;
 #endif
 
 	vcpuid = vmrun->cpuid;
@@ -2044,7 +2082,7 @@ vm_run(struct vm *vm, struct vm_run *vmrun)
 
 restart:
 #ifndef	__FreeBSD__
-	thread_affinity_set(curthread, CPU_CURRENT);
+	thread_affinity_set(curthread, affinity_type);
 	/*
 	 * Resource localization should happen after the CPU affinity for the
 	 * thread has been set to ensure that access from restricted contexts,
@@ -2054,6 +2092,8 @@ restart:
 	 * This must be done prior to disabling kpreempt via critical_enter().
 	 */
 	vm_localize_resources(vm, vcpu);
+
+	affinity_type = CPU_CURRENT;
 #endif
 
 	critical_enter();
@@ -2145,6 +2185,12 @@ restart:
 				retu = true;
 			}
 			break;
+
+		case VM_EXITCODE_HT: {
+			affinity_type = CPU_BEST;
+			break;
+		}
+
 #endif
 		default:
 			retu = true;	/* handled in userland */

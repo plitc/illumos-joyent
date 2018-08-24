@@ -254,6 +254,7 @@ extern "C" {
 #define	CPUID_INTC_EDX_7_0_AVX5124FMAPS	0x00000008	/* AVX512 4FMAPS */
 #define	CPUID_INTC_EDX_7_0_SPEC_CTRL	0x04000000	/* Spec, IBPB, IBRS */
 #define	CPUID_INTC_EDX_7_0_STIBP	0x08000000	/* STIBP */
+#define	CPUID_INTC_EDX_7_0_FLUSH_CMD	0x10000000	/* IA32_FLUSH_CMD */
 #define	CPUID_INTC_EDX_7_0_ARCH_CAPS	0x20000000	/* IA32_ARCH_CAPS */
 #define	CPUID_INTC_EDX_7_0_SSBD		0x80000000	/* SSBD */
 
@@ -362,11 +363,12 @@ extern "C" {
 /*
  * Intel IA32_ARCH_CAPABILITIES MSR.
  */
-#define	MSR_IA32_ARCH_CAPABILITIES	0x10a
-#define	IA32_ARCH_CAP_RDCL_NO		0x0001
-#define	IA32_ARCH_CAP_IBRS_ALL		0x0002
-#define	IA32_ARCH_CAP_RSBA		0x0004
-#define	IA32_ARCH_CAP_SSB_NO		0x0010
+#define	MSR_IA32_ARCH_CAPABILITIES		0x10a
+#define	IA32_ARCH_CAP_RDCL_NO			0x0001
+#define	IA32_ARCH_CAP_IBRS_ALL			0x0002
+#define	IA32_ARCH_CAP_RSBA			0x0004
+#define	IA32_ARCH_CAP_SKIP_L1DFL_VMENTRY	0x0008
+#define	IA32_ARCH_CAP_SSB_NO			0x0010
 
 /*
  * Intel Speculation related MSRs
@@ -378,6 +380,21 @@ extern "C" {
 
 #define	MSR_IA32_PRED_CMD	0x49
 #define	IA32_PRED_CMD_IBPB	0x01
+
+#define	MSR_IA32_FLUSH_CMD	0x10b
+#define	IA32_FLUSH_CMD_L1D	0x01
+
+/*
+ * Intel VMX related MSRs
+ */
+#define	MSR_IA32_FEAT_CTRL	0x03a
+#define	IA32_FEAT_CTRL_LOCK	0x1
+#define	IA32_FEAT_CTRL_SMX_EN	0x2
+#define	IA32_FEAT_CTRL_VMX_EN	0x4
+
+#define	MSR_IA32_VMX_BASIC	0x480
+#define	IA32_VMX_BASIC_INS_OUTS	(1UL << 54)
+
 
 #define	MCI_CTL_VALUE		0xffffffff
 
@@ -491,6 +508,8 @@ extern "C" {
 #define	X86FSET_RSBA		78
 #define	X86FSET_SSB_NO		79
 #define	X86FSET_STIBP_ALL	80
+#define	X86FSET_FLUSH_CMD	81
+#define	X86FSET_L1D_VM_NO	82
 
 /*
  * Intel Deep C-State invariant TSC in leaf 0x80000007.
@@ -726,16 +745,58 @@ extern "C" {
 
 
 /*
- * Definitions for Intel processor models. Note, these model values can overlap
- * in a given family. Processor models are added here on an as needed basis. The
- * Xeon extension here is to refer to what has been called the EP/EX lines or
- * E5/E7, generally multi-socket capable processors.
+ * Definitions for Intel processor models. These are all for Family 6
+ * processors. This list and the Atom set below it are not exhuastive.
  */
-#define	INTC_MODEL_IVYBRIDGE_XEON	0x3E
-#define	INTC_MODEL_HASWELL_XEON		0x3F
-#define	INTC_MODEL_BROADWELL_XEON	0x4F
+#define	INTC_MODEL_MEROM		0x0f
+#define	INTC_MODEL_PENRYN		0x17
+#define	INTC_MODEL_DUNNINGTON		0x1d
+
+#define	INTC_MODEL_NEHALEM		0x1e
+#define	INTC_MODEL_NEHALEM2		0x1f
+#define	INTC_MODEL_NEHALEM_EP		0x1a
+#define	INTC_MODEL_NEHALEM_EX		0x2e
+
+#define	INTC_MODEL_WESTMERE		0x25
+#define	INTC_MODEL_WESTMERE_EP		0x2c
+#define	INTC_MODEL_WESTMERE_EX		0x2f
+
+#define	INTC_MODEL_SANDYBRIDGE		0x2a
+#define	INTC_MODEL_SANDYBRIDGE_XEON	0x2d
+#define	INTC_MODEL_IVYBRIDGE		0x3a
+#define	INTC_MODEL_IVYBRIDGE_XEON	0x3e
+
+#define	INTC_MODEL_HASWELL		0x3c
+#define	INTC_MODEL_HASWELL_ULT		0x45
+#define	INTC_MODEL_HASWELL_GT3E		0x46
+#define	INTC_MODEL_HASWELL_XEON		0x3f
+
+#define	INTC_MODEL_BROADWELL		0x3d
+#define	INTC_MODEL_BROADELL_2		0x47
+#define	INTC_MODEL_BROADWELL_XEON	0x4f
 #define	INTC_MODEL_BROADWELL_XEON_D	0x56
+
+#define	INCC_MODEL_SKYLAKE_MOBILE	0x4e
 #define	INTC_MODEL_SKYLAKE_XEON		0x55
+#define	INTC_MODEL_SKYLAKE_DESKTOP	0x5e
+
+#define	INTC_MODEL_KABYLAKE_MOBILE	0x8e
+#define	INTC_MODEL_KABYLAKE_DESKTOP	0x9e
+
+/*
+ * Atom Processors
+ */
+#define	INTC_MODEL_SILVERTHORNE		0x1c
+#define	INTC_MODEL_LINCROFT		0x26
+#define	INTC_MODEL_PENWELL		0x27
+#define	INTC_MODEL_CLOVERVIEW		0x35
+#define	INTC_MODEL_CEDARVIEW		0x36
+#define	INTC_MODEL_BAY_TRAIL		0x37
+#define	INTC_MODEL_AVATON		0x4d
+#define	INTC_MODEL_AIRMONT		0x4c
+#define	INTC_MODEL_GOLDMONT		0x5c
+#define	INTC_MODEL_DENVERTON		0x5f
+#define	INTC_MODEL_GEMINI_LAKE		0x7a
 
 /*
  * xgetbv/xsetbv support
@@ -773,7 +834,7 @@ extern "C" {
 
 #if defined(_KERNEL) || defined(_KMEMUSER)
 
-#define	NUM_X86_FEATURES	81
+#define	NUM_X86_FEATURES	83
 extern uchar_t x86_featureset[];
 
 extern void free_x86_featureset(void *featureset);
@@ -791,6 +852,8 @@ extern uint_t x86_clflush_size;
 extern uint_t pentiumpro_bug4046376;
 
 extern const char CyrixInstead[];
+
+extern void (*spec_l1d_flush)(void);
 
 #endif
 

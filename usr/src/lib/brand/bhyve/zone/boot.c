@@ -38,7 +38,8 @@
 
 #define	ZH_MAXARGS		100
 
-#define	DEFAULT_BOOTROM		"/usr/share/bhyve/uefi-csm-rom.bin"
+#define	DEFAULT_BOOTROM		"/usr/share/bhyve/uefi-rom.bin"
+#define	DEFAULT_BOOTROM_CSM	"/usr/share/bhyve/uefi-csm-rom.bin"
 
 typedef enum {
 	PCI_SLOT_HOSTBRIDGE = 0,	/* Not used here, but reserved */
@@ -419,6 +420,11 @@ add_lpc(int *argc, char **argv)
 		}
 		if (i == bootrom_idx) {
 			found_bootrom = B_TRUE;
+			if (strcmp(val, "bios") == 0) {
+				val = DEFAULT_BOOTROM_CSM;
+			} else if (strcmp(val, "uefi") == 0) {
+				val = DEFAULT_BOOTROM;
+			}
 		}
 		if (snprintf(conf, sizeof (conf), "%s,%s", lpcdevs[i], val) >=
 		    sizeof (conf)) {
@@ -434,7 +440,7 @@ add_lpc(int *argc, char **argv)
 
 	if (!found_bootrom) {
 		if (add_arg(argc, argv, "-l") != 0 ||
-		    add_arg(argc, argv, "bootrom," DEFAULT_BOOTROM) != 0) {
+		    add_arg(argc, argv, "bootrom," DEFAULT_BOOTROM_CSM) != 0) {
 			return (-1);
 		}
 	}
@@ -579,8 +585,7 @@ setup_reboot(void)
 		return (-1);
 	}
 
-	if (zone_setattr(zoneid, ZONE_ATTR_INITREBOOT, NULL, 0) < 0 ||
-	    zone_setattr(zoneid, ZONE_ATTR_INITRESTART0, NULL, 0) < 0) {
+	if (zone_setattr(zoneid, ZONE_ATTR_INITRESTART0, NULL, 0) < 0) {
 		(void) printf("Error: bhyve zoneid %ld setattr failed: %s\n",
 		    zoneid, strerror(errno));
 		return (-1);
