@@ -137,6 +137,12 @@
 	DGDEF3(kpti_enable, 8, 8)
 	.fill	1, 8, 1
 
+#if DEBUG
+	.data
+_bad_ts_panic_msg:
+	.string "kpti_trampolines.s: tr_iret_user but CR0.TS set"
+#endif
+
 .section ".text";
 .align MMU_PAGESIZE
 
@@ -244,6 +250,11 @@ kpti_kbase:
 /*
  * This is used for all interrupts that can plausibly be taken inside another
  * interrupt and are using a kpti_frame stack (so #BP, #DB, #GP, #PF, #SS).
+ *
+ * We also use this for #NP, even though it uses the standard IST: the
+ * additional %rsp checks below will catch when we get an exception doing an
+ * iret to userspace with a bad %cs/%ss.  This appears as a kernel trap, and
+ * only later gets redirected via kern_gpfault().
  *
  * We check for whether we took the interrupt while in another trampoline, in
  * which case we need to use the kthread stack.
@@ -523,6 +534,28 @@ tr_intr_ret_start:
 	SET_SIZE(tr_iret_kernel)
 
 	ENTRY_NP(tr_iret_user)
+#if DEBUG
+	/*
+	 * Ensure that we return to user land with CR0.TS clear. We do this
+	 * before we trampoline back and pivot the stack and %cr3. This way
+	 * we're still on the kernel stack and kernel %cr3, though we are on the
+	 * user GSBASE.
+	 */
+	pushq	%rax
+	mov	%cr0, %rax
+	testq	$CR0_TS, %rax
+	jz	1f
+	swapgs
+	popq	%rax
+	leaq	_bad_ts_panic_msg(%rip), %rdi
+	xorl	%eax, %eax
+	pushq	%rbp
+	movq	%rsp, %rbp
+	call	panic
+1:
+	popq	%rax
+#endif
+
 	cmpq	$1, kpti_enable
 	jne	1f
 
@@ -621,7 +654,7 @@ tr_intr_ret_end:
 	MK_INTR_TRAMPOLINE_NOERR(invoptrap)
 	MK_INTR_TRAMPOLINE_NOERR(ndptrap)
 	MK_INTR_TRAMPOLINE(invtsstrap)
-	MK_INTR_TRAMPOLINE(segnptrap)
+	MK_DBG_INTR_TRAMPOLINE(segnptrap)
 	MK_DBG_INTR_TRAMPOLINE(stktrap)
 	MK_DBG_INTR_TRAMPOLINE(gptrap)
 	MK_DBG_INTR_TRAMPOLINE(pftrap)

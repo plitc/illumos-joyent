@@ -28,6 +28,10 @@
  * $FreeBSD$
  */
 
+/*
+ * Copyright 2018 Joyent, Inc.
+ */
+
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
@@ -66,7 +70,12 @@ __FBSDID("$FreeBSD$");
 #define BLOCKIF_SIG	0xb109b109
 
 #define BLOCKIF_NUMTHR	8
+#ifdef __FreeBSD__
 #define BLOCKIF_MAXREQ	(64 + BLOCKIF_NUMTHR)
+#else
+/* Enlarge to keep pace with the virtio-block ring size */
+#define BLOCKIF_MAXREQ	(128 + BLOCKIF_NUMTHR)
+#endif
 
 enum blockop {
 	BOP_READ,
@@ -108,8 +117,8 @@ struct blockif_ctxt {
 	int			bc_psectoff;
 	int			bc_closing;
 	pthread_t		bc_btid[BLOCKIF_NUMTHR];
-        pthread_mutex_t		bc_mtx;
-        pthread_cond_t		bc_cond;
+	pthread_mutex_t		bc_mtx;
+	pthread_cond_t		bc_cond;
 
 	/* Request elements and free/pending/busy queues */
 	TAILQ_HEAD(, blockif_elem) bc_freeq;       
@@ -271,8 +280,8 @@ blockif_proc(struct blockif_ctxt *bc, struct blockif_elem *be, uint8_t *buf)
 #ifndef __FreeBSD__
 	case BOP_WRITE_SYNC:
 		sync = B_TRUE;
-		/* FALLTHROUGH */
 #endif
+		/* FALLTHROUGH */
 	case BOP_WRITE:
 		if (bc->bc_rdonly) {
 			err = EROFS;

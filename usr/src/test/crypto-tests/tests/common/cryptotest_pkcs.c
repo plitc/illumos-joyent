@@ -49,7 +49,7 @@ cryptotest_error(char *name, CK_RV rv)
 }
 
 crypto_op_t *
-cryptotest_init(cryptotest_t *arg, size_t fg)
+cryptotest_init(cryptotest_t *arg, crypto_func_group_t fg)
 {
 	crypto_op_t *op = malloc(sizeof (*op));
 
@@ -67,6 +67,7 @@ cryptotest_init(cryptotest_t *arg, size_t fg)
 	op->mechname = arg->mechname;
 
 	op->hsession = CK_INVALID_HANDLE;
+	op->keyt = CK_INVALID_HANDLE;
 	op->fg = fg;
 
 	if (op->out == NULL)
@@ -88,7 +89,9 @@ cryptotest_close_session(CK_SESSION_HANDLE hsession)
 int
 cryptotest_close(crypto_op_t *op)
 {
-	(void) C_DestroyObject(op->hsession, op->keyt);
+	if (op->keyt != CK_INVALID_HANDLE)
+		(void) C_DestroyObject(op->hsession, op->keyt);
+
 	if (op->hsession != CK_INVALID_HANDLE)
 		(void) cryptotest_close_session(op->hsession);
 	free(op);
@@ -451,4 +454,24 @@ digest_final(crypto_op_t *op)
 	if (rv != CKR_OK)
 		cryptotest_error("C_DigestFinal", rv);
 	return (rv);
+}
+
+void
+ccm_init_params(void *buf, ulong_t ulDataLen, uchar_t *pNonce,
+    ulong_t ulNonceLen, uchar_t *pAAD, ulong_t ulAADLen, ulong_t ulMACLen)
+{
+	CK_CCM_PARAMS *pp = buf;
+
+	pp->ulDataLen = ulDataLen;
+	pp->pNonce = pNonce;
+	pp->ulNonceLen = ulNonceLen;
+	pp->pAAD = pAAD;
+	pp->ulAADLen = ulAADLen;
+	pp->ulMACLen = ulMACLen;
+}
+
+size_t
+ccm_param_len(void)
+{
+	return (sizeof (CK_CCM_PARAMS));
 }

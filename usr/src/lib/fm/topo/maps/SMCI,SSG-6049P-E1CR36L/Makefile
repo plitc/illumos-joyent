@@ -20,14 +20,37 @@
 ARCH = i86pc
 CLASS = arch
 DTDFILE = topology.dtd.1
+JOYENT_PLATFORMS = \
+	Joyent-S10G5-hc-topology.xml
+
+JOYENT_USBMAPS = \
+	Joyent-S10G5-usb.usbtopo
+
+ROOTJOYENTMAPS = $(JOYENT_PLATFORMS:%=$(arch_ROOTTOPOROOT)/%)
+ROOTJOYENTUSB = $(JOYENT_USBMAPS:%=$(arch_ROOTTOPOROOT)/%)
 
 TOPOFILE = \
 	SSG-6049P-E1CR36L-hc-topology.xml \
 	SSG-6049P-E1CR36L-chassis-hc-topology.xml \
-	SSG-6049P-E1CR36L-slot-hc-topology.xml
+	SSG-6049P-E1CR36L-slot-hc-topology.xml \
+	SSG-6049P-E1CR36L-usb.usbtopo
 
 SRCDIR = ../SMCI,SSG-6049P-E1CR36L
 
 PLATFORM = SSG-6049P-E1CR36L
 
 include ../Makefile.map
+
+install: $(ROOTJOYENTMAPS) $(ROOTJOYENTUSB)
+#
+# Note, the Joyent S10G5 is based on the SuperMicro SSG-6049P-E1CR36L.
+# Because of that, the topo map used here will work for all such
+# systems.
+#
+$(ROOTJOYENTMAPS): SSG-6049P-E1CR36L-hc-topology.xml
+	$(RM) $@
+	$(SYMLINK) ./$? $@
+
+$(ROOTJOYENTUSB): SSG-6049P-E1CR36L-usb.usbtopo
+	$(RM) $@
+	$(SYMLINK) ./$? $@

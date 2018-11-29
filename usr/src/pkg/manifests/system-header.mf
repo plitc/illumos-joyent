@@ -26,6 +26,7 @@
 # Copyright 2014 Garrett D'Amore <garrett@damore.org>
 # Copyright 2018 Nexenta Systems, Inc.
 # Copyright 2016 Hans Rosenfeld <rosenfeld@grumpf.hope-2000.org>
+# Copyright (c) 2018, Joyent, Inc.
 #
 
 set name=pkg.fmri value=pkg:/system/header@$(PKGVERS)
@@ -841,6 +842,7 @@ file path=usr/include/sys/conf.h
 file path=usr/include/sys/consdev.h
 file path=usr/include/sys/console.h
 file path=usr/include/sys/consplat.h
+file path=usr/include/sys/containerof.h
 file path=usr/include/sys/contract.h
 file path=usr/include/sys/contract/device.h
 file path=usr/include/sys/contract/device_impl.h
@@ -854,7 +856,9 @@ file path=usr/include/sys/corectl.h
 file path=usr/include/sys/cpc_impl.h
 file path=usr/include/sys/cpc_pcbe.h
 file path=usr/include/sys/cpr.h
+file path=usr/include/sys/cpu_uarray.h
 file path=usr/include/sys/cpu.h
+file path=usr/include/sys/cpu_uarray.h
 file path=usr/include/sys/cpucaps.h
 file path=usr/include/sys/cpucaps_impl.h
 file path=usr/include/sys/cpupart.h
@@ -919,6 +923,7 @@ file path=usr/include/sys/dirent.h
 file path=usr/include/sys/disp.h
 file path=usr/include/sys/dkbad.h
 file path=usr/include/sys/dkio.h
+file path=usr/include/sys/dkioc_free_util.h
 file path=usr/include/sys/dklabel.h
 $(sparc_ONLY)file path=usr/include/sys/dkmpio.h
 $(i386_ONLY)file path=usr/include/sys/dktp/altsctr.h
@@ -1675,6 +1680,7 @@ $(i386_ONLY)file path=usr/platform/i86pc/include/sys/cram.h
 $(i386_ONLY)file path=usr/platform/i86pc/include/sys/ddi_subrdefs.h
 $(i386_ONLY)file path=usr/platform/i86pc/include/sys/debug_info.h
 $(i386_ONLY)file path=usr/platform/i86pc/include/sys/fastboot.h
+$(i386_ONLY)file path=usr/platform/i86pc/include/sys/ht.h
 $(i386_ONLY)file path=usr/platform/i86pc/include/sys/mach_mmu.h
 $(i386_ONLY)file path=usr/platform/i86pc/include/sys/machclock.h
 $(i386_ONLY)file path=usr/platform/i86pc/include/sys/machcpuvar.h
@@ -1730,6 +1736,7 @@ $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/errclassify.h
 $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/fhc.h
 $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/gpio_87317.h
 $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/hpc3130_events.h
+$(sparc_ONLY)file path=usr/platform/sun4u/include/sys/ht.h
 $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/i2c/clients/hpc3130.h
 $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/i2c/clients/i2c_client.h
 $(sparc_ONLY)file path=usr/platform/sun4u/include/sys/i2c/clients/lm75.h
@@ -1793,6 +1800,7 @@ $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/dvma.h
 $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/eeprom.h
 $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/fcode.h
 $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/hsvc.h
+$(sparc_ONLY)file path=usr/platform/sun4v/include/sys/ht.h
 $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/hypervisor_api.h
 $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/idprom.h
 $(sparc_ONLY)file path=usr/platform/sun4v/include/sys/intr.h

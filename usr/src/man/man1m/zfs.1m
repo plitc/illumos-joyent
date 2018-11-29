@@ -26,10 +26,11 @@
 .\" Copyright (c) 2015, Joyent, Inc. All rights reserved.
 .\" Copyright (c) 2014 by Adam Stevko. All rights reserved.
 .\" Copyright (c) 2014 Integros [integros.com]
-.\" Copyright 2017 Nexenta Systems, Inc.
+.\" Copyright 2018 Nexenta Systems, Inc.
 .\" Copyright 2018 Joyent, Inc.
+.\" Copyright (c) 2018 Datto Inc.
 .\"
-.Dd December 6, 2017
+.Dd Feb 10, 2018
 .Dt ZFS 1M
 .Os
 .Sh NAME
@@ -271,7 +272,7 @@
 .Ar snapshot Ar snapshot Ns | Ns Ar filesystem
 .Nm
 .Cm program
-.Op Fl n
+.Op Fl jn
 .Op Fl t Ar timeout
 .Op Fl m Ar memory_limit
 .Ar pool script
@@ -550,6 +551,13 @@ Compression can be turned on by running:
 .Nm zfs Cm set Sy compression Ns = Ns Sy on Ar dataset .
 The default value is
 .Sy off .
+.It Sy createtxg
+The transaction group (txg) in which the dataset was created.
+Bookmarks have the same
+.Sy createtxg
+as the snapshot they are initially tied to.
+This property is suitable for ordering a list of snapshots,
+e.g. for incremental send and receive.
 .It Sy creation
 The time this dataset was created.
 .It Sy clones
@@ -581,6 +589,14 @@ the dataset tree.
 This value is only available when a
 .Sy filesystem_limit
 has been set somewhere in the tree under which the dataset resides.
+.It Sy guid
+The 64 bit GUID of this dataset or bookmark which does not change over its
+entire lifetime.
+When a snapshot is sent to another pool, the received snapshot has the same
+GUID.
+Thus, the
+.Sy guid
+is suitable to identify a snapshot across pools.
 .It Sy logicalreferenced
 The amount of space that is
 .Qq logically
@@ -1002,10 +1018,6 @@ Please see
 for more information on these algorithms.
 .Pp
 Changing this property affects only newly-written data.
-.Pp
-Salted checksum algorithms
-.Pq Cm edonr , skein
-are currently not supported for any filesystem on the boot pools.
 .It Xo
 .Sy compression Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy gzip Ns | Ns
 .Sy gzip- Ns Em N Ns | Ns Sy lz4 Ns | Ns Sy lzjb Ns | Ns Sy zle
@@ -3131,7 +3143,8 @@ for more information.
 .Ar perm Ns | Ns @ Ns Ar setname Ns Oo , Ns Ar perm Ns | Ns @ Ns
 .Ar setname Oc Ns ...
 .Ar filesystem Ns | Ns Ar volume
-.br
+.Xc
+.It Xo
 .Nm
 .Cm allow
 .Op Fl dl
@@ -3305,7 +3318,8 @@ and can be no more than 64 characters long.
 .Oo Ar perm Ns | Ns @ Ns Ar setname Ns Oo , Ns Ar perm Ns | Ns @ Ns
 .Ar setname Oc Ns ... Oc
 .Ar filesystem Ns | Ns Ar volume
-.br
+.Xc
+.It Xo
 .Nm
 .Cm unallow
 .Op Fl dlr
@@ -3313,7 +3327,8 @@ and can be no more than 64 characters long.
 .Oo Ar perm Ns | Ns @ Ns Ar setname Ns Oo , Ns Ar perm Ns | Ns @ Ns
 .Ar setname Oc Ns ... Oc
 .Ar filesystem Ns | Ns Ar volume
-.br
+.Xc
+.It Xo
 .Nm
 .Cm unallow
 .Op Fl r
@@ -3461,7 +3476,7 @@ Display the path's inode change time as the first column of output.
 .It Xo
 .Nm
 .Cm program
-.Op Fl n
+.Op Fl jn
 .Op Fl t Ar timeout
 .Op Fl m Ar memory_limit
 .Ar pool script
@@ -3482,6 +3497,11 @@ Channel programs may only be run with root privileges.
 For full documentation of the ZFS channel program interface, see the manual
 page for
 .Bl -tag -width ""
+.It Fl j
+Display channel program output in JSON format.
+When this flag is specified and standard output is empty -
+channel program encountered an error.
+The details of such an error will be printed to standard error in plain text.
 .It Fl n
 Executes a read-only channel program, which runs faster.
 The program cannot change on-disk state by calling functions from

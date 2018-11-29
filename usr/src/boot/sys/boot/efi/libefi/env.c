@@ -402,6 +402,7 @@ efi_memory_type(EFI_MEMORY_TYPE type)
 	    "PalCode",
 	    "PersistentMemory"
 	};
+
 	switch (type) {
 	case EfiReservedMemoryType:
 	case EfiLoaderCode:
@@ -419,8 +420,9 @@ efi_memory_type(EFI_MEMORY_TYPE type)
 	case EfiPalCode:
 	case EfiPersistentMemory:
 		return (types[type]);
+	default:
+		return ("Unknown");
 	}
-	return ("Unknown");
 }
 
 /* Print memory type table. */
@@ -517,13 +519,11 @@ efi_print_global(const CHAR16 *varnamearg, uint8_t *data, UINTN datasz)
 	    strncmp("Driver", var, 5) == 0 ||
 	    strncmp("SysPrep", var, 7) == 0 ||
 	    strncmp("OsRecovery", var, 10) == 0) {
-		UINT32 attr;
 		UINT16 filepathlistlen;
 		CHAR16 *text;
 		int desclen;
 		EFI_DEVICE_PATH *dp;
 
-		attr = *(uint32_t *)data;
 		data += sizeof(UINT32);
 		filepathlistlen = *(uint16_t *)data;
 		data += sizeof (UINT16);
@@ -652,7 +652,8 @@ efi_print_var(CHAR16 *varnamearg, EFI_GUID *matchguid, int lflag)
 	UINTN		datasz;
 	EFI_STATUS	status;
 	UINT32		attr;
-	char		*str, *data;
+	char		*str;
+	uint8_t		*data;
 	int		rv = CMD_OK;
 
 	str = NULL;
@@ -723,8 +724,8 @@ command_efi_show(int argc, char *argv[])
 	 *	print all the env vars tagged with UUID
 	 * efi-show -v var
 	 *	search all the env vars and print the ones matching var
-	 * eif-show -g UUID -v var
-	 * eif-show UUID var
+	 * efi-show -g UUID -v var
+	 * efi-show UUID var
 	 *	print all the env vars that match UUID and var
 	 */
 	/* NB: We assume EFI_GUID is the same as uuid_t */

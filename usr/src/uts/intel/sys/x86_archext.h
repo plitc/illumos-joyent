@@ -90,7 +90,7 @@ extern "C" {
  */
 
 #define	CPUID_INTC_ECX_SSE3	0x00000001	/* Yet more SSE extensions */
-#define	CPUID_INTC_ECX_PCLMULQDQ 0x00000002 	/* PCLMULQDQ insn */
+#define	CPUID_INTC_ECX_PCLMULQDQ 0x00000002	/* PCLMULQDQ insn */
 #define	CPUID_INTC_ECX_DTES64	0x00000004	/* 64-bit DS area */
 #define	CPUID_INTC_ECX_MON	0x00000008	/* MONITOR/MWAIT */
 #define	CPUID_INTC_ECX_DSCPL	0x00000010	/* CPL-qualified debug store */
@@ -187,7 +187,16 @@ extern "C" {
 /*
  * AMD uses %ebx for some of their features (extended function 0x80000008).
  */
-#define	CPUID_AMD_EBX_ERR_PTR_ZERO	0x00000004 /* AMD: FP Err. Ptr. Zero */
+#define	CPUID_AMD_EBX_ERR_PTR_ZERO	0x000000004 /* AMD: FP Err. Ptr. Zero */
+#define	CPUID_AMD_EBX_IBPB		0x000001000 /* AMD: IBPB */
+#define	CPUID_AMD_EBX_IBRS		0x000004000 /* AMD: IBRS */
+#define	CPUID_AMD_EBX_STIBP		0x000008000 /* AMD: STIBP */
+#define	CPUID_AMD_EBX_IBRS_ALL		0x000010000 /* AMD: Enhanced IBRS */
+#define	CPUID_AMD_EBX_STIBP_ALL		0x000020000 /* AMD: STIBP ALL */
+#define	CPUID_AMD_EBX_PREFER_IBRS	0x000040000 /* AMD: Don't retpoline */
+#define	CPUID_AMD_EBX_SSBD		0x001000000 /* AMD: SSBD */
+#define	CPUID_AMD_EBX_VIRT_SSBD		0x002000000 /* AMD: VIRT SSBD */
+#define	CPUID_AMD_EBX_SSB_NO		0x004000000 /* AMD: SSB Fixed */
 
 /*
  * Intel now seems to have claimed part of the "extended" function
@@ -243,6 +252,11 @@ extern "C" {
 
 #define	CPUID_INTC_EDX_7_0_AVX5124NNIW	0x00000004	/* AVX512 4NNIW */
 #define	CPUID_INTC_EDX_7_0_AVX5124FMAPS	0x00000008	/* AVX512 4FMAPS */
+#define	CPUID_INTC_EDX_7_0_SPEC_CTRL	0x04000000	/* Spec, IBPB, IBRS */
+#define	CPUID_INTC_EDX_7_0_STIBP	0x08000000	/* STIBP */
+#define	CPUID_INTC_EDX_7_0_FLUSH_CMD	0x10000000	/* IA32_FLUSH_CMD */
+#define	CPUID_INTC_EDX_7_0_ARCH_CAPS	0x20000000	/* IA32_ARCH_CAPS */
+#define	CPUID_INTC_EDX_7_0_SSBD		0x80000000	/* SSBD */
 
 #define	CPUID_INTC_EDX_7_0_ALL_AVX512 \
 	(CPUID_INTC_EDX_7_0_AVX5124NNIW | CPUID_INTC_EDX_7_0_AVX5124FMAPS)
@@ -309,10 +323,10 @@ extern "C" {
 #define	MSR_PRP4_LBSTK_FROM_5	0x685
 #define	MSR_PRP4_LBSTK_FROM_6	0x686
 #define	MSR_PRP4_LBSTK_FROM_7	0x687
-#define	MSR_PRP4_LBSTK_FROM_8 	0x688
+#define	MSR_PRP4_LBSTK_FROM_8	0x688
 #define	MSR_PRP4_LBSTK_FROM_9	0x689
 #define	MSR_PRP4_LBSTK_FROM_10	0x68a
-#define	MSR_PRP4_LBSTK_FROM_11 	0x68b
+#define	MSR_PRP4_LBSTK_FROM_11	0x68b
 #define	MSR_PRP4_LBSTK_FROM_12	0x68c
 #define	MSR_PRP4_LBSTK_FROM_13	0x68d
 #define	MSR_PRP4_LBSTK_FROM_14	0x68e
@@ -326,7 +340,7 @@ extern "C" {
 #define	MSR_PRP4_LBSTK_TO_6	0x6c6
 #define	MSR_PRP4_LBSTK_TO_7	0x6c7
 #define	MSR_PRP4_LBSTK_TO_8	0x6c8
-#define	MSR_PRP4_LBSTK_TO_9 	0x6c9
+#define	MSR_PRP4_LBSTK_TO_9	0x6c9
 #define	MSR_PRP4_LBSTK_TO_10	0x6ca
 #define	MSR_PRP4_LBSTK_TO_11	0x6cb
 #define	MSR_PRP4_LBSTK_TO_12	0x6cc
@@ -345,6 +359,42 @@ extern "C" {
 #define	MSR_PPIN_CTL_MASK	0x03
 #define	MSR_PPIN_CTL_LOCKED	0x01
 #define	MSR_PPIN_CTL_ENABLED	0x02
+
+/*
+ * Intel IA32_ARCH_CAPABILITIES MSR.
+ */
+#define	MSR_IA32_ARCH_CAPABILITIES		0x10a
+#define	IA32_ARCH_CAP_RDCL_NO			0x0001
+#define	IA32_ARCH_CAP_IBRS_ALL			0x0002
+#define	IA32_ARCH_CAP_RSBA			0x0004
+#define	IA32_ARCH_CAP_SKIP_L1DFL_VMENTRY	0x0008
+#define	IA32_ARCH_CAP_SSB_NO			0x0010
+
+/*
+ * Intel Speculation related MSRs
+ */
+#define	MSR_IA32_SPEC_CTRL	0x48
+#define	IA32_SPEC_CTRL_IBRS	0x01
+#define	IA32_SPEC_CTRL_STIBP	0x02
+#define	IA32_SPEC_CTRL_SSBD	0x04
+
+#define	MSR_IA32_PRED_CMD	0x49
+#define	IA32_PRED_CMD_IBPB	0x01
+
+#define	MSR_IA32_FLUSH_CMD	0x10b
+#define	IA32_FLUSH_CMD_L1D	0x01
+
+/*
+ * Intel VMX related MSRs
+ */
+#define	MSR_IA32_FEAT_CTRL	0x03a
+#define	IA32_FEAT_CTRL_LOCK	0x1
+#define	IA32_FEAT_CTRL_SMX_EN	0x2
+#define	IA32_FEAT_CTRL_VMX_EN	0x4
+
+#define	MSR_IA32_VMX_BASIC	0x480
+#define	IA32_VMX_BASIC_INS_OUTS	(1UL << 54)
+
 
 #define	MCI_CTL_VALUE		0xffffffff
 
@@ -448,6 +498,18 @@ extern "C" {
 #define	X86FSET_OSPKE		68
 #define	X86FSET_PCID		69
 #define	X86FSET_INVPCID		70
+#define	X86FSET_IBRS		71
+#define	X86FSET_IBPB		72
+#define	X86FSET_STIBP		73
+#define	X86FSET_SSBD		74
+#define	X86FSET_SSBD_VIRT	75
+#define	X86FSET_RDCL_NO		76
+#define	X86FSET_IBRS_ALL	77
+#define	X86FSET_RSBA		78
+#define	X86FSET_SSB_NO		79
+#define	X86FSET_STIBP_ALL	80
+#define	X86FSET_FLUSH_CMD	81
+#define	X86FSET_L1D_VM_NO	82
 
 /*
  * Intel Deep C-State invariant TSC in leaf 0x80000007.
@@ -683,16 +745,58 @@ extern "C" {
 
 
 /*
- * Definitions for Intel processor models. Note, these model values can overlap
- * in a given family. Processor models are added here on an as needed basis. The
- * Xeon extension here is to refer to what has been called the EP/EX lines or
- * E5/E7, generally multi-socket capable processors.
+ * Definitions for Intel processor models. These are all for Family 6
+ * processors. This list and the Atom set below it are not exhuastive.
  */
-#define	INTC_MODEL_IVYBRIDGE_XEON	0x3E
-#define	INTC_MODEL_HASWELL_XEON		0x3F
-#define	INTC_MODEL_BROADWELL_XEON	0x4F
+#define	INTC_MODEL_MEROM		0x0f
+#define	INTC_MODEL_PENRYN		0x17
+#define	INTC_MODEL_DUNNINGTON		0x1d
+
+#define	INTC_MODEL_NEHALEM		0x1e
+#define	INTC_MODEL_NEHALEM2		0x1f
+#define	INTC_MODEL_NEHALEM_EP		0x1a
+#define	INTC_MODEL_NEHALEM_EX		0x2e
+
+#define	INTC_MODEL_WESTMERE		0x25
+#define	INTC_MODEL_WESTMERE_EP		0x2c
+#define	INTC_MODEL_WESTMERE_EX		0x2f
+
+#define	INTC_MODEL_SANDYBRIDGE		0x2a
+#define	INTC_MODEL_SANDYBRIDGE_XEON	0x2d
+#define	INTC_MODEL_IVYBRIDGE		0x3a
+#define	INTC_MODEL_IVYBRIDGE_XEON	0x3e
+
+#define	INTC_MODEL_HASWELL		0x3c
+#define	INTC_MODEL_HASWELL_ULT		0x45
+#define	INTC_MODEL_HASWELL_GT3E		0x46
+#define	INTC_MODEL_HASWELL_XEON		0x3f
+
+#define	INTC_MODEL_BROADWELL		0x3d
+#define	INTC_MODEL_BROADELL_2		0x47
+#define	INTC_MODEL_BROADWELL_XEON	0x4f
 #define	INTC_MODEL_BROADWELL_XEON_D	0x56
+
+#define	INCC_MODEL_SKYLAKE_MOBILE	0x4e
 #define	INTC_MODEL_SKYLAKE_XEON		0x55
+#define	INTC_MODEL_SKYLAKE_DESKTOP	0x5e
+
+#define	INTC_MODEL_KABYLAKE_MOBILE	0x8e
+#define	INTC_MODEL_KABYLAKE_DESKTOP	0x9e
+
+/*
+ * Atom Processors
+ */
+#define	INTC_MODEL_SILVERTHORNE		0x1c
+#define	INTC_MODEL_LINCROFT		0x26
+#define	INTC_MODEL_PENWELL		0x27
+#define	INTC_MODEL_CLOVERVIEW		0x35
+#define	INTC_MODEL_CEDARVIEW		0x36
+#define	INTC_MODEL_BAY_TRAIL		0x37
+#define	INTC_MODEL_AVATON		0x4d
+#define	INTC_MODEL_AIRMONT		0x4c
+#define	INTC_MODEL_GOLDMONT		0x5c
+#define	INTC_MODEL_DENVERTON		0x5f
+#define	INTC_MODEL_GEMINI_LAKE		0x7a
 
 /*
  * xgetbv/xsetbv support
@@ -730,7 +834,7 @@ extern "C" {
 
 #if defined(_KERNEL) || defined(_KMEMUSER)
 
-#define	NUM_X86_FEATURES	71
+#define	NUM_X86_FEATURES	83
 extern uchar_t x86_featureset[];
 
 extern void free_x86_featureset(void *featureset);
@@ -748,6 +852,8 @@ extern uint_t x86_clflush_size;
 extern uint_t pentiumpro_bug4046376;
 
 extern const char CyrixInstead[];
+
+extern void (*spec_l1d_flush)(void);
 
 #endif
 
@@ -787,8 +893,8 @@ extern void setcr4(ulong_t);
 
 extern void mtrr_sync(void);
 
-extern void cpu_fast_syscall_enable(void *);
-extern void cpu_fast_syscall_disable(void *);
+extern void cpu_fast_syscall_enable(void);
+extern void cpu_fast_syscall_disable(void);
 
 struct cpu;
 
@@ -843,6 +949,8 @@ extern void cpuid_pass3(struct cpu *);
 extern void cpuid_pass4(struct cpu *, uint_t *);
 extern void cpuid_set_cpu_properties(void *, processorid_t,
     struct cpuid_info *);
+extern void cpuid_pass_ucode(struct cpu *, uchar_t *);
+extern void cpuid_post_ucodeadm(void);
 
 extern void cpuid_get_addrsize(struct cpu *, uint_t *, uint_t *);
 extern uint_t cpuid_get_dtlb_nent(struct cpu *, size_t);
@@ -915,6 +1023,10 @@ extern int is_controldom(void);
 extern void enable_pcid(void);
 
 extern void xsave_setup_msr(struct cpu *);
+
+#if !defined(__xpv)
+extern void reset_gdtr_limit(void);
+#endif
 
 /*
  * Hypervisor signatures

@@ -22,7 +22,7 @@
 #
 # Copyright (c) 1989, 2010, Oracle and/or its affiliates. All rights reserved.
 # Copyright (c) 2012 by Delphix. All rights reserved.
-# Copyright 2017 Joyent, Inc.
+# Copyright 2018, Joyent, Inc.
 # Copyright (c) 2013 Gary Mills
 # Copyright 2014 Garrett D'Amore <garrett@damore.org>
 # Copyright (c) 2015 Gary Mills
@@ -30,6 +30,7 @@
 # Copyright 2018 Nexenta Systems, Inc.
 # Copyright (c) 2016, Chris Fraire <cfraire@me.com>.
 # Copyright 2017 RackTop Systems.
+# Copyirght 2018 Jason King
 #
 
 include ../Makefile.master
@@ -106,6 +107,8 @@ SUBDIRS +=				\
 	libcryptoutil	\
 	libctf		\
 	libcurses	\
+	libcustr	\
+	libdemangle	\
 	libdevice	\
 	libdevid	\
 	libdevinfo	\
@@ -118,7 +121,6 @@ SUBDIRS +=				\
 	libdlpi		\
 	libdns_sd	\
 	libdoor		\
-	libdscfg	\
 	libdtrace	\
 	libdtrace_jni	\
 	libdwarf	\
@@ -172,7 +174,6 @@ SUBDIRS +=				\
 	libndmp		\
 	libnisdb	\
 	libnls		\
-	libnsctl	\
 	libnwam		\
 	libofmt		\
 	libpam		\
@@ -189,7 +190,6 @@ SUBDIRS +=				\
 	libpthread	\
 	libraidcfg	\
 	librcm		\
-	librdc		\
 	librename	\
 	libreparse	\
 	libresolv	\
@@ -234,7 +234,6 @@ SUBDIRS +=				\
 	libtsnet	\
 	libtsol		\
 	libumem		\
-	libunistat	\
 	libuuid		\
 	libuutil	\
 	libvnd		\
@@ -391,6 +390,8 @@ HDRSUBDIRS=				\
 	libcryptoutil	\
 	libctf		\
 	libcurses	\
+	libcustr	\
+	libdemangle	\
 	libdevice	\
 	libdevid	\
 	libdevinfo	\
@@ -403,7 +404,6 @@ HDRSUBDIRS=				\
 	libdll		\
 	libdlpi		\
 	libdns_sd	\
-	libdscfg	\
 	libdtrace	\
 	libdtrace_jni	\
 	libelfsign	\
@@ -437,7 +437,6 @@ HDRSUBDIRS=				\
 	libmlrpc	\
 	libmtmalloc	\
 	libndmp		\
-	libnsctl	\
 	libnsl		\
 	libnvpair	\
 	libnwam		\
@@ -453,7 +452,6 @@ HDRSUBDIRS=				\
 	libproc		\
 	libraidcfg	\
 	librcm		\
-	librdc		\
 	librename	\
 	libreparse	\
 	librestart	\
@@ -487,7 +485,6 @@ HDRSUBDIRS=				\
 	libtsnet	\
 	libtsol		\
 	libumem		\
-	libunistat	\
 	libuutil	\
 	libvnd		\
 	libvolmgt	\
@@ -588,7 +585,7 @@ dbusdeps:	libsecdb libtsol libinetutil libscf libuutil libgen libsmbios
 # libc libm libmd libmp libnsl libnvpair libsocket
 abi:		libctf libmapmalloc libproc
 auditd_plugins: libbsm libsecdb libgss libmtmalloc
-brand:		libzonecfg libmapmalloc libipadm libcmdutils libproc librpcsvc
+brand:		libzonecfg libmapmalloc libipadm libcustr libproc librpcsvc
 cfgadm_plugins:	libdevice libdevinfo libhotplug librcm hbaapi libkstat libscf
 fm:		libexacct libipmi libzfs scsi libdevinfo libdevid libcfgadm \
 		libcontract libsysevent ../cmd/sgs/libelf libdladm libsff \
@@ -622,7 +619,6 @@ libdladm:	libdevinfo libinetutil libscf librcm libexacct libkstat \
 libdll: 	libast
 libdlpi:	libinetutil libdladm
 libds:		libsysevent
-libdscfg:	libnsctl libunistat libadm
 libdtrace:	libproc libgen libctf libmapmalloc
 libdtrace_jni:	libuutil libdtrace
 libefi:		libuuid libsmbios
@@ -642,9 +638,9 @@ libinetsvc:	libscf
 libinstzones:	libzonecfg libcontract
 libipadm:	libinetutil libdlpi libdhcpagent libdladm libsecdb libdhcputil
 libipmp:	libinetutil
-libipsecutil:	libtecla libtsol
+libipsecutil:	libtecla libtsol libkmf
 libiscsit:	libstmf libuuid
-libkmf:		libcryptoutil pkcs11
+libkmf:		libcryptoutil pkcs11 libcustr
 libkvm:		../cmd/sgs/libelf
 libldap5:	libsasl
 libmapid:	libresolv2 libscf
@@ -664,7 +660,6 @@ libproject:	libpool libproc libsecdb
 libprtdiag:	libkstat
 libprtdiag_psr:	libprtdiag
 libraidcfg:	libdevinfo
-librdc:		libnsctl libunistat libdscfg
 librestart:	libuutil libscf libpool libproject libsecdb libsysevent
 libsasl:	libgss pkcs11
 libsaveargs:	libdisasm
@@ -728,7 +723,7 @@ sun_fc:		libdevinfo libsysevent
 sun_sas:	libdevinfo libsysevent libkstat libdevid
 udapl:		libdevinfo libdladm
 varpd:		libavl libidspace libumem libnsl libnvpair libmd5 librename \
-		libbunyan libcmdutils
+		libbunyan libcustr
 
 #
 # The reason this rule checks for the existence of the

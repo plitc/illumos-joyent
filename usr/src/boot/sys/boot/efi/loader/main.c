@@ -51,8 +51,6 @@
 
 #include "loader_efi.h"
 
-extern char bootprog_info[];
-
 struct arch_switch archsw;	/* MI/MD interface boundary */
 
 EFI_GUID devid = DEVICE_PATH_PROTOCOL;
@@ -72,14 +70,14 @@ efi_zfs_is_preferred(EFI_HANDLE *h)
 	return (h == img->DeviceHandle);
 }
 
-static int
+static bool
 has_keyboard(void)
 {
 	EFI_STATUS status;
 	EFI_DEVICE_PATH *path;
 	EFI_HANDLE *hin, *hin_end, *walker;
 	UINTN sz;
-	int retval = 0;
+	bool retval = false;
 
 	/*
 	 * Find all the handles that support the SIMPLE_TEXT_INPUT_PROTOCOL and
@@ -96,7 +94,7 @@ has_keyboard(void)
 			free(hin);
 	}
 	if (EFI_ERROR(status))
-		return retval;
+		return (retval);
 
 	/*
 	 * Look at each of the handles. If it supports the device path protocol,
@@ -126,7 +124,7 @@ has_keyboard(void)
 				acpi = (ACPI_HID_DEVICE_PATH *)(void *)path;
 				if ((EISA_ID_TO_NUM(acpi->HID) & 0xff00) == 0x300 &&
 				    (acpi->HID & 0xffff) == PNP_EISA_ID_CONST) {
-					retval = 1;
+					retval = true;
 					goto out;
 				}
 			/*
@@ -142,7 +140,7 @@ has_keyboard(void)
 				if (usb->DeviceClass == 3 && /* HID */
 				    usb->DeviceSubClass == 1 && /* Boot devices */
 				    usb->DeviceProtocol == 1) { /* Boot keyboards */
-					retval = 1;
+					retval = true;
 					goto out;
 				}
 			}
@@ -151,7 +149,7 @@ has_keyboard(void)
 	}
 out:
 	free(hin);
-	return retval;
+	return (retval);
 }
 
 static void
@@ -292,10 +290,11 @@ main(int argc, CHAR16 *argv[])
 {
 	char var[128];
 	EFI_GUID *guid;
-	int i, j, vargood, howto;
+	int i, j, howto;
+	bool vargood;
 	void *ptr;
 	UINTN k;
-	int has_kbd;
+	bool has_kbd;
 
 	archsw.arch_autoload = efi_autoload;
 	archsw.arch_getdev = efi_getdev;
@@ -400,14 +399,14 @@ main(int argc, CHAR16 *argv[])
 				}
 			}
 		} else {
-			vargood = 0;
+			vargood = false;
 			for (j = 0; argv[i][j] != 0; j++) {
 				if (j == sizeof(var)) {
-					vargood = 0;
+					vargood = false;
 					break;
 				}
 				if (j > 0 && argv[i][j] == '=')
-					vargood = 1;
+					vargood = true;
 				var[j] = (char)argv[i][j];
 			}
 			if (vargood) {
@@ -469,6 +468,7 @@ main(int argc, CHAR16 *argv[])
 
 	efi_init_environment();
 	setenv("ISADIR", "amd64", 1);	/* we only build 64bit */
+	bi_isadir();			/* set ISADIR */
 	acpi_detect();
 
 	if ((ptr = efi_get_table(&smbios3)) == NULL)
@@ -492,6 +492,23 @@ command_reboot(int argc __unused, char *argv[] __unused)
 			(devsw[i]->dv_cleanup)();
 
 	RS->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+
+	/* NOTREACHED */
+	return (CMD_ERROR);
+}
+
+COMMAND_SET(poweroff, "poweroff", "power off the system", command_poweroff);
+
+static int
+command_poweroff(int argc __unused, char *argv[] __unused)
+{
+	int i;
+
+	for (i = 0; devsw[i] != NULL; ++i)
+		if (devsw[i]->dv_cleanup != NULL)
+			(devsw[i]->dv_cleanup)();
+
+	RS->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
 
 	/* NOTREACHED */
 	return (CMD_ERROR);
@@ -536,11 +553,9 @@ command_memmap(int argc __unused, char *argv[] __unused)
 
 	for (i = 0, p = map; i < ndesc;
 	     i++, p = NextMemoryDescriptor(p, dsz)) {
-		snprintf(line, 80, "%23s %012lx %012lx %08lx ",
-		    efi_memory_type(p->Type),
-		    p->PhysicalStart,
-		    p->VirtualStart,
-		    p->NumberOfPages);
+		snprintf(line, 80, "%23s %012jx %012jx %08jx ",
+		    efi_memory_type(p->Type), p->PhysicalStart,
+		    p->VirtualStart, p->NumberOfPages);
 		rv = pager_output(line);
 		if (rv)
 			break;

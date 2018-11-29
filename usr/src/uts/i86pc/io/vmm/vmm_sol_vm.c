@@ -19,6 +19,7 @@
 #include <sys/list.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <sys/ddi.h>
 #include <sys/sysmacros.h>
 #include <sys/machsystm.h>
 #include <sys/vmsystm.h>
@@ -693,7 +694,6 @@ eptable_mapout(eptable_map_t *map, uintptr_t va)
 		mutex_exit(&map->em_lock);
 		return;
 	} else {
-		pfn_t oldpfn;
 		const size_t pagesize = LEVEL_SIZE((uint_t)ept->ept_level);
 
 		if (!EPT_MAPS_PAGE(ept->ept_level, entry)) {
@@ -705,7 +705,6 @@ eptable_mapout(eptable_map_t *map, uintptr_t va)
 		 * XXXJOY: Just clean the entry for now. Assume(!) that
 		 * invalidation is going to occur anyways.
 		 */
-		oldpfn = EPT_PTE_PFN(ptes[idx]);
 		ept->ept_valid_cnt--;
 		ptes[idx] = (x86pte_t)0;
 		map->em_wired -= (pagesize >> PAGESHIFT);
@@ -932,6 +931,48 @@ vm_object_pager_sg(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
 	return (pfn);
 }
 
+static void
+vm_reserve_pages(size_t npages)
+{
+	uint_t retries = 60;
+	int rc;
+
+	mutex_enter(&freemem_lock);
+	if (availrmem < npages) {
+		mutex_exit(&freemem_lock);
+
+		/*
+		 * Set needfree and wait for the ZFS ARC reap thread to free up
+		 * some memory.
+		 */
+		page_needfree(npages);
+
+		mutex_enter(&freemem_lock);
+		while ((availrmem < npages) && retries-- > 0) {
+			mutex_exit(&freemem_lock);
+			rc = delay_sig(drv_usectohz(1 * MICROSEC));
+			mutex_enter(&freemem_lock);
+
+			if (rc == EINTR)
+				break;
+		}
+		mutex_exit(&freemem_lock);
+
+		page_needfree(-npages);
+	} else {
+		mutex_exit(&freemem_lock);
+	}
+}
+
+void
+vm_object_clear(vm_object_t vmo)
+{
+	ASSERT(vmo->vmo_type == OBJT_DEFAULT);
+
+	/* XXXJOY: Better zeroing approach? */
+	bzero(vmo->vmo_data, vmo->vmo_size);
+}
+
 vm_object_t
 vm_object_allocate(objtype_t type, vm_pindex_t psize)
 {
@@ -948,6 +989,8 @@ vm_object_allocate(objtype_t type, vm_pindex_t psize)
 
 	switch (type) {
 	case OBJT_DEFAULT: {
+		vm_reserve_pages(psize);
+
 		/* XXXJOY: opt-in to larger pages? */
 		vmo->vmo_data = vmem_alloc(vmm_alloc_arena, size, KM_NOSLEEP);
 		if (vmo->vmo_data == NULL) {
@@ -955,8 +998,7 @@ vm_object_allocate(objtype_t type, vm_pindex_t psize)
 			kmem_free(vmo, sizeof (*vmo));
 			return (NULL);
 		}
-		/* XXXJOY: Better zeroing approach? */
-		bzero(vmo->vmo_data, size);
+		vm_object_clear(vmo);
 		vmo->vmo_pager = vm_object_pager_heap;
 	}
 		break;

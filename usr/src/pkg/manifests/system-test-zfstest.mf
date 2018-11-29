@@ -14,6 +14,7 @@
 # Copyright 2015, 2016 Nexenta Systems, Inc.  All rights reserved.
 # Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
 # Copyright 2018 Joyent, Inc.
+# Copyright (c) 2018 Datto Inc.
 #
 
 set name=pkg.fmri value=pkg:/system/test/zfstest@$(PKGVERS)
@@ -53,6 +54,7 @@ dir path=opt/zfs-tests/tests/functional/cli_root/zfs_destroy
 dir path=opt/zfs-tests/tests/functional/cli_root/zfs_get
 dir path=opt/zfs-tests/tests/functional/cli_root/zfs_inherit
 dir path=opt/zfs-tests/tests/functional/cli_root/zfs_mount
+dir path=opt/zfs-tests/tests/functional/cli_root/zfs_program
 dir path=opt/zfs-tests/tests/functional/cli_root/zfs_promote
 dir path=opt/zfs-tests/tests/functional/cli_root/zfs_property
 dir path=opt/zfs-tests/tests/functional/cli_root/zfs_receive
@@ -878,6 +880,11 @@ file path=opt/zfs-tests/tests/functional/cli_root/zfs_mount/zfs_mount_all_fail \
     mode=0555
 file \
     path=opt/zfs-tests/tests/functional/cli_root/zfs_mount/zfs_mount_all_mountpoints \
+    mode=0555
+file path=opt/zfs-tests/tests/functional/cli_root/zfs_program/cleanup \
+    mode=0555
+file path=opt/zfs-tests/tests/functional/cli_root/zfs_program/setup mode=0555
+file path=opt/zfs-tests/tests/functional/cli_root/zfs_program/zfs_program_json \
     mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zfs_promote/cleanup \
     mode=0555
@@ -2365,7 +2372,7 @@ file path=opt/zfs-tests/tests/functional/refreserv/refreserv_004_pos mode=0555
 file path=opt/zfs-tests/tests/functional/refreserv/refreserv_005_pos mode=0555
 file path=opt/zfs-tests/tests/functional/refreserv/setup mode=0555
 file path=opt/zfs-tests/tests/functional/removal/cleanup mode=0555
-file path=opt/zfs-tests/tests/functional/removal/removal.kshlib mode=0555
+file path=opt/zfs-tests/tests/functional/removal/removal.kshlib mode=0444
 file path=opt/zfs-tests/tests/functional/removal/removal_all_vdev mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_check_space mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_condense_export \
@@ -2396,6 +2403,7 @@ file path=opt/zfs-tests/tests/functional/removal/removal_with_snapshot \
     mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_write mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_zdb mode=0555
+file path=opt/zfs-tests/tests/functional/removal/remove_expanded mode=0555
 file path=opt/zfs-tests/tests/functional/removal/remove_mirror mode=0555
 file path=opt/zfs-tests/tests/functional/removal/remove_mirror_sanity \
     mode=0555
@@ -2719,13 +2727,16 @@ file path=opt/zfs-tests/tests/longevity/slop_space_test mode=0555
 file path=opt/zfs-tests/tests/perf/fio/mkfiles.fio mode=0444
 file path=opt/zfs-tests/tests/perf/fio/random_reads.fio mode=0444
 file path=opt/zfs-tests/tests/perf/fio/random_readwrite.fio mode=0444
+file path=opt/zfs-tests/tests/perf/fio/random_readwrite_fixed.fio mode=0444
 file path=opt/zfs-tests/tests/perf/fio/random_writes.fio mode=0444
 file path=opt/zfs-tests/tests/perf/fio/sequential_reads.fio mode=0444
 file path=opt/zfs-tests/tests/perf/fio/sequential_writes.fio mode=0444
 file path=opt/zfs-tests/tests/perf/perf.shlib mode=0444
 file path=opt/zfs-tests/tests/perf/regression/random_reads mode=0555
 file path=opt/zfs-tests/tests/perf/regression/random_readwrite mode=0555
+file path=opt/zfs-tests/tests/perf/regression/random_readwrite_fixed mode=0555
 file path=opt/zfs-tests/tests/perf/regression/random_writes mode=0555
+file path=opt/zfs-tests/tests/perf/regression/random_writes_zil mode=0555
 file path=opt/zfs-tests/tests/perf/regression/sequential_reads mode=0555
 file path=opt/zfs-tests/tests/perf/regression/sequential_reads_arc_cached \
     mode=0555
@@ -2737,8 +2748,10 @@ file path=opt/zfs-tests/tests/perf/regression/sequential_reads_dbuf_cached \
 file path=opt/zfs-tests/tests/perf/regression/sequential_writes mode=0555
 file path=opt/zfs-tests/tests/perf/regression/setup mode=0555
 file path=opt/zfs-tests/tests/perf/scripts/io.d mode=0444
+file path=opt/zfs-tests/tests/perf/scripts/offcpu-profile.d mode=0444
 file path=opt/zfs-tests/tests/perf/scripts/prefetch_io.d mode=0444
 file path=opt/zfs-tests/tests/perf/scripts/profile.d mode=0444
+file path=opt/zfs-tests/tests/perf/scripts/zil.d mode=0444
 file path=opt/zfs-tests/tests/stress/races/remove_file_while_remap mode=0555
 license cr_Sun license=cr_Sun
 license lic_CDDL license=lic_CDDL

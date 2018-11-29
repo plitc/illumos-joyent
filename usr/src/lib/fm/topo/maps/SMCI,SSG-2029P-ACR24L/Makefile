@@ -20,12 +20,20 @@
 ARCH = i86pc
 CLASS = arch
 DTDFILE = topology.dtd.1
+JOYENT_PLATFORMS = \
+	Joyent-M12G5-hc-topology.xml
+
+JOYENT_USBMAPS = \
+	Joyent-M12G5-usb.usbtopo
+ROOTJOYENTMAPS = $(JOYENT_PLATFORMS:%=$(arch_ROOTTOPOROOT)/%)
+ROOTJOYENTUSB = $(JOYENT_USBMAPS:%=$(arch_ROOTTOPOROOT)/%)
 
 TOPOFILE = \
 	SSG-2029P-ACR24L-hc-topology.xml \
 	SSG-2029P-ACR24L-chassis-hc-topology.xml \
 	SSG-2029P-ACR24L-disk-hc-topology.xml \
-	SSG-2029P-ACR24L-slot-hc-topology.xml
+	SSG-2029P-ACR24L-slot-hc-topology.xml \
+	SSG-2029P-ACR24L-usb.usbtopo
 
 SRCDIR = ../SMCI,SSG-2029P-ACR24L
 
@@ -34,3 +42,18 @@ PLATFORM = SSG-2029P-ACR24L
 CLOBBERFILES +=	SSG-2029P-ACR24L-disk-hc-topology.xml
 
 include ../Makefile.map
+
+install: $(ROOTJOYENTMAPS) $(ROOTJOYENTUSB)
+
+#
+# Note, the Joyent M12G5 is based on the SuperMicro SSG-2029P-ACR24L.
+# Because of that, the topo map used here will work for all such
+# systems.
+#
+$(ROOTJOYENTMAPS): SSG-2029P-ACR24L-hc-topology.xml
+	$(RM) $@
+	$(SYMLINK) ./$? $@
+
+$(ROOTJOYENTUSB): SSG-2029P-ACR24L-usb.usbtopo
+	$(RM) $@
+	$(SYMLINK) ./$? $@

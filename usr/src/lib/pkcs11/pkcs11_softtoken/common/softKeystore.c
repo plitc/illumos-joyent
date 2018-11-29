@@ -1359,7 +1359,7 @@ soft_unpack_object(soft_object_t *objp, uchar_t *buf)
 	biginteger_t	expo1;
 	biginteger_t	expo2;
 	biginteger_t	coef;
-	CK_RV 		rv = CKR_OK;
+	CK_RV		rv = CKR_OK;
 	ulong_t offset = 0;
 	uint64_t tmp_val;
 
@@ -2264,10 +2264,9 @@ soft_destroy_token_session(void)
  */
 CK_RV
 soft_keystore_crypt(soft_object_t *key_p, uchar_t *ivec, boolean_t encrypt,
-	CK_BYTE_PTR in, CK_ULONG in_len, CK_BYTE_PTR out, CK_ULONG_PTR out_len)
+    CK_BYTE_PTR in, CK_ULONG in_len, CK_BYTE_PTR out, CK_ULONG_PTR out_len)
 {
 	CK_MECHANISM	mech;
-	soft_aes_ctx_t *soft_aes_ctx;
 	CK_RV rv;
 	CK_ULONG tmplen, tmplen1;
 
@@ -2291,51 +2290,16 @@ soft_keystore_crypt(soft_object_t *key_p, uchar_t *ivec, boolean_t encrypt,
 		if (rv != CKR_OK)
 			return (rv);
 
-
-		(void) pthread_mutex_lock(&token_session.session_mutex);
-
-		if (encrypt)
-			soft_aes_ctx =
-			    (soft_aes_ctx_t *)token_session.encrypt.context;
-		else
-			soft_aes_ctx =
-			    (soft_aes_ctx_t *)token_session.decrypt.context;
-
-		/* Copy Initialization Vector (IV) into the context. */
-		(void) memcpy(soft_aes_ctx->ivec, ivec, AES_BLOCK_LEN);
-
-		/* Allocate a context for AES cipher-block chaining. */
-		soft_aes_ctx->aes_cbc = (void *)aes_cbc_ctx_init(
-		    soft_aes_ctx->key_sched, soft_aes_ctx->keysched_len,
-		    soft_aes_ctx->ivec);
-
-		if (soft_aes_ctx->aes_cbc == NULL) {
-			freezero(soft_aes_ctx->key_sched,
-			    soft_aes_ctx->keysched_len);
-			if (encrypt) {
-				free(token_session.encrypt.context);
-				token_session.encrypt.context = NULL;
-			} else {
-				free(token_session.encrypt.context);
-				token_session.encrypt.context = NULL;
-			}
-
-			(void) pthread_mutex_unlock(&token_session.
-			    session_mutex);
-			return (CKR_HOST_MEMORY);
-		}
-
-		(void) pthread_mutex_unlock(&token_session.session_mutex);
 		/*
 		 * Since out == NULL, the soft_aes_xxcrypt_common() will
 		 * simply return the output buffer length to the caller.
 		 */
 		if (encrypt) {
-			rv = soft_aes_encrypt_common(&token_session, in,
-			    in_len, out, out_len, B_FALSE);
+			rv = soft_aes_encrypt(&token_session, in, in_len,
+			    out, out_len);
 		} else {
-			rv = soft_aes_decrypt_common(&token_session, in,
-			    in_len, out, out_len, B_FALSE);
+			rv = soft_aes_decrypt(&token_session, in, in_len,
+			    out, out_len);
 		}
 
 	} else {
@@ -2345,8 +2309,8 @@ soft_keystore_crypt(soft_object_t *key_p, uchar_t *ivec, boolean_t encrypt,
 		 */
 		tmplen = *out_len;
 		if (encrypt) {
-			rv = soft_aes_encrypt_common(&token_session, in,
-			    in_len, out, &tmplen, B_TRUE);
+			rv = soft_aes_encrypt_update(&token_session, in,
+			    in_len, out, &tmplen);
 			if (rv == CKR_OK) {
 				tmplen1 = *out_len - tmplen;
 				rv = soft_encrypt_final(&token_session,
@@ -2354,8 +2318,8 @@ soft_keystore_crypt(soft_object_t *key_p, uchar_t *ivec, boolean_t encrypt,
 				*out_len = tmplen + tmplen1;
 			}
 		} else {
-			rv = soft_aes_decrypt_common(&token_session, in,
-			    in_len, out, &tmplen, B_TRUE);
+			rv = soft_aes_decrypt_update(&token_session, in,
+			    in_len, out, &tmplen);
 			if (rv == CKR_OK) {
 				tmplen1 = *out_len - tmplen;
 				rv = soft_decrypt_final(&token_session,
@@ -2376,7 +2340,7 @@ soft_keystore_crypt(soft_object_t *key_p, uchar_t *ivec, boolean_t encrypt,
  */
 CK_RV
 soft_keystore_hmac(soft_object_t *key_p, boolean_t sign,
-	CK_BYTE_PTR in, CK_ULONG in_len, CK_BYTE_PTR out, CK_ULONG_PTR out_len)
+    CK_BYTE_PTR in, CK_ULONG in_len, CK_BYTE_PTR out, CK_ULONG_PTR out_len)
 {
 	CK_MECHANISM mech;
 	CK_RV rv;

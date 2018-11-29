@@ -222,9 +222,6 @@
  * vdev state is protected by spa_vdev_state_enter() / spa_vdev_state_exit().
  * Like spa_vdev_enter/exit, these are convenience wrappers -- the actual
  * locking is, always, based on spa_namespace_lock and spa_config_lock[].
- *
- * spa_rename() is also implemented within this file since it requires
- * manipulation of the namespace.
  */
 
 static avl_tree_t spa_namespace_avl;
@@ -1334,56 +1331,6 @@ spa_deactivate_mos_feature(spa_t *spa, const char *feature)
 }
 
 /*
- * Rename a spa_t.
- */
-int
-spa_rename(const char *name, const char *newname)
-{
-	spa_t *spa;
-	int err;
-
-	/*
-	 * Lookup the spa_t and grab the config lock for writing.  We need to
-	 * actually open the pool so that we can sync out the necessary labels.
-	 * It's OK to call spa_open() with the namespace lock held because we
-	 * allow recursive calls for other reasons.
-	 */
-	mutex_enter(&spa_namespace_lock);
-	if ((err = spa_open(name, &spa, FTAG)) != 0) {
-		mutex_exit(&spa_namespace_lock);
-		return (err);
-	}
-
-	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
-
-	avl_remove(&spa_namespace_avl, spa);
-	(void) strlcpy(spa->spa_name, newname, sizeof (spa->spa_name));
-	avl_add(&spa_namespace_avl, spa);
-
-	/*
-	 * Sync all labels to disk with the new names by marking the root vdev
-	 * dirty and waiting for it to sync.  It will pick up the new pool name
-	 * during the sync.
-	 */
-	vdev_config_dirty(spa->spa_root_vdev);
-
-	spa_config_exit(spa, SCL_ALL, FTAG);
-
-	txg_wait_synced(spa->spa_dsl_pool, 0);
-
-	/*
-	 * Sync the updated config cache.
-	 */
-	spa_write_cachefile(spa, B_FALSE, B_TRUE);
-
-	spa_close(spa, FTAG);
-
-	mutex_exit(&spa_namespace_lock);
-
-	return (0);
-}
-
-/*
  * Return the spa_t associated with given pool_guid, if it exists.  If
  * device_guid is non-zero, determine whether the pool exists *and* contains
  * a device with the specified device_guid.
@@ -1908,6 +1855,12 @@ bp_get_dsize(spa_t *spa, const blkptr_t *bp)
 	spa_config_exit(spa, SCL_VDEV, FTAG);
 
 	return (dsize);
+}
+
+uint64_t
+spa_dirty_data(spa_t *spa)
+{
+	return (spa->spa_dsl_pool->dp_dirty_total);
 }
 
 /*

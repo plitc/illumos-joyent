@@ -227,7 +227,7 @@ struct fxsave_state {
 	upad128_t	fx_xmm[8];	/* 128-bit registers */
 	upad128_t	__fx_ign2[14];
 #endif
-};	/* 512 bytes */
+} __aligned(16);	/* 512 bytes */
 
 /*
  * This structure is written to memory by one of the 'xsave' instruction
@@ -236,13 +236,14 @@ struct fxsave_state {
  * 13.4.2 of the Intel 64 and IA-32 Architectures Software Developer’s Manual,
  * Volume 1 (IASDv1). The extended portion is documented in section 13.4.3.
  *
- * Our size is at least AVX_XSAVE_SIZE (832 bytes), asserted in fpnoextflt().
- * Enabling additional xsave-related CPU features requires an increase in the
- * size. We dynamically allocate the per-lwp xsave area at runtime, based on
- * the size needed for the CPU-specific features. This xsave_state structure
- * simply defines our historical layout for the beginning of the xsave area. The
- * locations and size of new, extended, components is determined dynamically by
- * querying the CPU. See the xsave_info structure in cpuid.c.
+ * Our size is at least AVX_XSAVE_SIZE (832 bytes), which is asserted
+ * statically.  Enabling additional xsave-related CPU features requires an
+ * increase in the size. We dynamically allocate the per-lwp xsave area at
+ * runtime, based on the size needed for the CPU-specific features. This
+ * xsave_state structure simply defines our historical layout for the beginning
+ * of the xsave area. The locations and size of new, extended, components is
+ * determined dynamically by querying the CPU. See the xsave_info structure in
+ * cpuid.c.
  *
  * xsave component usage is tracked using bits in the xs_xstate_bv field. The
  * components are documented in section 13.1 of IASDv1. For easy reference,
@@ -270,7 +271,7 @@ struct xsave_state {
 	uint64_t		xs_xcomp_bv;	/* 520-527 */
 	uint64_t		xs_reserved[6];	/* 528-575 end xsave header */
 	upad128_t		xs_ymm[16];	/* 576 AVX component */
-};
+} __aligned(64);
 
 /*
  * Kernel's FPU save area
@@ -301,7 +302,6 @@ extern uint32_t sse_mxcsr_mask;
 
 extern void fpu_probe(void);
 extern uint_t fpu_initial_probe(void);
-extern int fpu_probe_pentium_fdivbug(void);
 
 extern void fpu_auxv_info(int *, size_t *);
 
@@ -314,6 +314,10 @@ extern void xsave_excp_clr_ctxt(void *);
 extern void xsaveopt_excp_clr_ctxt(void *);
 extern void (*fpsave_ctxt)(void *);
 extern void (*xsavep)(struct xsave_state *, uint64_t);
+
+extern void fpxrestore_ctxt(void *);
+extern void xrestore_ctxt(void *);
+extern void (*fprestore_ctxt)(void *);
 
 extern void fxsave_insn(struct fxsave_state *);
 extern void fpsave(struct fnsave_state *);
@@ -335,11 +339,11 @@ extern uint32_t fpgetcwsw(void);
 extern uint32_t fpgetmxcsr(void);
 
 struct regs;
-extern int fpnoextflt(struct regs *);
-extern int fpextovrflt(struct regs *);
 extern int fpexterrflt(struct regs *);
 extern int fpsimderrflt(struct regs *);
 extern void fpsetcw(uint16_t, uint32_t);
+extern void fp_seed(void);
+extern void fp_exec(void);
 struct _klwp;
 extern void fp_lwp_init(struct _klwp *);
 extern void fp_lwp_cleanup(struct _klwp *);

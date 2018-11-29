@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013, Anish Gupta (akgupt3@gmail.com)
  * All rights reserved.
  *
@@ -50,6 +52,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/cpufunc.h>
 #include <machine/psl.h>
 #include <machine/md_var.h>
+#include <machine/reg.h>
 #include <machine/specialreg.h>
 #include <machine/smp.h>
 #include <machine/vmm.h>
@@ -528,8 +531,8 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 	    PAT_VALUE(7, PAT_UNCACHEABLE);
 
 	/* Set up DR6/7 to power-on state */
-	state->dr6 = 0xffff0ff0;
-	state->dr7 = 0x400;
+	state->dr6 = DBREG_DR6_RESERVED1;
+	state->dr7 = DBREG_DR7_RESERVED1;
 }
 
 /*
@@ -1377,6 +1380,7 @@ svm_vmexit(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 			 */
 			reflect = 0;
 			VCPU_CTR0(svm_sc->vm, vcpu, "Vectoring to MCE handler");
+			/* XXXJOY: we will need equivalent of vmx_call_trap */
 			__asm __volatile("int $18");
 			break;
 		case IDT_PF:

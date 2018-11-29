@@ -455,7 +455,7 @@ static const ddi_dma_attr_t i40e_g_txbind_dma_attr = {
 	DMA_ATTR_V0,			/* version number */
 	0x0000000000000000ull,		/* low address */
 	0xFFFFFFFFFFFFFFFFull,		/* high address */
-	I40E_MAX_TX_BUFSZ,		/* dma counter max */
+	I40E_MAX_TX_BUFSZ - 1,		/* dma counter max */
 	I40E_DMA_ALIGNMENT,		/* alignment */
 	0x00000FFF,			/* burst sizes */
 	0x00000001,			/* minimum transfer size */
@@ -470,7 +470,7 @@ static const ddi_dma_attr_t i40e_g_txbind_lso_dma_attr = {
 	DMA_ATTR_V0,			/* version number */
 	0x0000000000000000ull,		/* low address */
 	0xFFFFFFFFFFFFFFFFull,		/* high address */
-	I40E_MAX_TX_BUFSZ,		/* dma counter max */
+	I40E_MAX_TX_BUFSZ - 1,		/* dma counter max */
 	I40E_DMA_ALIGNMENT,		/* alignment */
 	0x00000FFF,			/* burst sizes */
 	0x00000001,			/* minimum transfer size */
@@ -1043,6 +1043,13 @@ i40e_free_ring_mem(i40e_t *i40e, boolean_t failed_init)
 
 	for (i = 0; i < i40e->i40e_num_trqpairs; i++) {
 		i40e_rx_data_t *rxd = i40e->i40e_trqpairs[i].itrq_rxdata;
+
+		/*
+		 * In some cases i40e_alloc_rx_data() may have failed
+		 * and in that case there is no rxd to free.
+		 */
+		if (rxd == NULL)
+			continue;
 
 		/*
 		 * Clean up our RX data. We have to free DMA resources first and
@@ -2071,10 +2078,11 @@ i40e_tx_cleanup_ring(i40e_trqpair_t *itrq)
 		i40e_tx_control_block_t *tcb;
 
 		tcb = itrq->itrq_tcb_work_list[index];
-		VERIFY(tcb != NULL);
-		itrq->itrq_tcb_work_list[index] = NULL;
-		i40e_tcb_reset(tcb);
-		i40e_tcb_free(itrq, tcb);
+		if (tcb != NULL) {
+			itrq->itrq_tcb_work_list[index] = NULL;
+			i40e_tcb_reset(tcb);
+			i40e_tcb_free(itrq, tcb);
+		}
 
 		bzero(&itrq->itrq_desc_ring[index], sizeof (i40e_tx_desc_t));
 		index = i40e_next_desc(index, 1, itrq->itrq_tx_ring_size);
@@ -2218,10 +2226,11 @@ i40e_tx_bind_fragment(i40e_trqpair_t *itrq, const mblk_t *mp,
 	else
 		dma_handle = tcb->tcb_dma_handle;
 
-	dmaflags = DDI_DMA_RDWR | DDI_DMA_STREAMING;
+	dmaflags = DDI_DMA_WRITE | DDI_DMA_STREAMING;
 	if (ddi_dma_addr_bind_handle(dma_handle, NULL,
 	    (caddr_t)mp->b_rptr, MBLKL(mp), dmaflags, DDI_DMA_DONTWAIT, NULL,
 	    &dma_cookie, &ncookies) != DDI_DMA_MAPPED) {
+		txs->itxs_bind_fails.value.ui64++;
 		goto bffail;
 	}
 	tcb->tcb_bind_ncookies = ncookies;
@@ -2276,6 +2285,13 @@ i40e_tx_set_data_desc(i40e_trqpair_t *itrq, i40e_tx_context_t *tctx,
 		cmd |= I40E_TX_DESC_CMD_EOP;
 		cmd |= I40E_TX_DESC_CMD_RS;
 	}
+
+	/*
+	 * Per the X710 manual, section 8.4.2.1.1, the buffer size
+	 * must be a value from 1 to 16K minus 1, inclusive.
+	 */
+	ASSERT3U(dbi->dbi_len, >=, 1);
+	ASSERT3U(dbi->dbi_len, <=, I40E_MAX_TX_BUFSZ - 1);
 
 	txdesc->buffer_addr = CPU_TO_LE64((uintptr_t)dbi->dbi_paddr);
 	txdesc->cmd_type_offset_bsz =

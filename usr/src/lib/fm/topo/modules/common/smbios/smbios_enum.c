@@ -37,7 +37,7 @@ typedef struct smb_enum_data {
 /*
  * This function serves two purposes.  It filters out memory devices that
  * don't have a formfactor that represents a reasonably modern DIMM-like
- * device (and hence not a device we're insterested in enumerating).  It also
+ * device (and hence not a device we're interested in enumerating).  It also
  * converts the numeric SMBIOS type representation to a more generic TOPO dimm
  * type.
  *
@@ -535,7 +535,7 @@ err:
 }
 
 /*
- * A system with a functional memory controller driver will have one  mc device
+ * A system with a functional memory controller driver will have one mc device
  * node per chip instance, starting at instance 0.  The driver provides an
  * ioctl interface for retrieving a snapshot of the system's memory topology.
  * If we're able to issue this ioctl on one of the mc device nodes then we'll

@@ -49,7 +49,7 @@ typedef struct test_fg {
 	testfunc_t update;
 } test_fg_t;
 
-#define	CRYPTO_INVALID_SESSION ((size_t)-1)
+#define	CRYPTO_INVALID_SESSION ((crypto_session_id_t)-1)
 typedef struct crypto_op crypto_op_t;
 
 int run_test(cryptotest_t *args, uint8_t *cmp, size_t cmplen, test_fg_t *funcs);
@@ -106,6 +106,15 @@ extern test_fg_t cryptotest_digest_fg;
 #define	ENCR_FG (&cryptotest_encr_fg)
 #define	DECR_FG (&cryptotest_decr_fg)
 #define	DIGEST_FG (&cryptotest_digest_fg)
+
+/*
+ * KCF and PKCS11 use different structures for the CCM params (CK_AES_CCM_PARAMS
+ * and CK_CCM_PARAMS respectively.  Each cryptotest_*.c file implements this
+ * for their respective structs.
+ */
+void ccm_init_params(void *, ulong_t, uchar_t *, ulong_t, uchar_t *, ulong_t,
+    ulong_t);
+size_t ccm_param_len(void);
 
 #ifdef __cplusplus
 }

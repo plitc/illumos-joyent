@@ -44,16 +44,21 @@
 #ifdef	__FreeBSD__
 #define BLOCKIF_IOV_MAX		33	/* not practical to be IOV_MAX */
 #else
-#define BLOCKIF_IOV_MAX		17	/* not practical to be IOV_MAX */
+/*
+ * Upstream is in the process of bumping this up to 128 for several reasons,
+ * including Windows compatibility.  For the sake of our Windows support, we
+ * will use the higher value now.
+ */
+#define	BLOCKIF_IOV_MAX		128
 #endif
 
 struct blockif_req {
-	struct iovec	br_iov[BLOCKIF_IOV_MAX];
 	int		br_iovcnt;
 	off_t		br_offset;
 	ssize_t		br_resid;
 	void		(*br_callback)(struct blockif_req *req, int err);
 	void		*br_param;
+	struct iovec	br_iov[BLOCKIF_IOV_MAX];
 };
 
 struct blockif_ctxt;

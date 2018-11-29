@@ -24,12 +24,14 @@
 #include <sys/mkdev.h>
 #include <sys/sunddi.h>
 #include <sys/fs/dv_node.h>
-#include <sys/pc_hvm.h>
 #include <sys/cpuset.h>
 #include <sys/id_space.h>
 #include <sys/fs/sdev_plugin.h>
+#include <sys/ht.h>
 
 #include <sys/kernel.h>
+#include <sys/hma.h>
+#include <sys/x86_archext.h>
 
 #include <sys/vmm.h>
 #include <sys/vmm_instruction_emul.h>
@@ -63,8 +65,7 @@ static void *vmm_statep;
 
 static kmutex_t		vmmdev_mtx;
 static id_space_t	*vmmdev_minors;
-static uint_t		vmmdev_inst_count = 0;
-static boolean_t	vmmdev_load_failure;
+static hma_reg_t	*vmm_hma_reg;
 static kmutex_t		vmm_mtx;
 static list_t		vmmdev_list;
 
@@ -77,7 +78,7 @@ static const char *vmmdev_hvm_name = "bhyve";
 static sdev_plugin_hdl_t vmm_sdev_hdl;
 
 /* From uts/i86pc/io/vmm/intel/vmx.c */
-extern int vmx_x86_supported(char **);
+extern int vmx_x86_supported(const char **);
 
 /* Holds and hooks from drivers external to vmm */
 struct vmm_hold {
@@ -374,6 +375,10 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 			break;
 		}
 		vmrun.cpuid = vcpu;
+
+		if (!(curthread->t_schedflag & TS_VCPU))
+			ht_mark_as_vcpu();
+
 		error = vm_run(sc->vmm_vm, &vmrun);
 		/*
 		 * XXXJOY: I think it's necessary to do copyout, even in the
@@ -991,7 +996,7 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		 * If they want a ulong_t or less, make sure they receive the
 		 * low bits with all the useful information.
 		 */
-		if (size <= tempset.cpub[0]) {
+		if (size <= sizeof (tempset.cpub[0])) {
 			srcp = &tempset.cpub[0];
 		}
 
@@ -1007,7 +1012,7 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 
 		ASSERT(size > 0 && size <= sizeof (tempset));
 		if (error == 0 &&
-		    ddi_copyout(&tempset, vm_cpuset.cpus, size, md)) {
+		    ddi_copyout(srcp, vm_cpuset.cpus, size, md)) {
 			error = EFAULT;
 			break;
 		}
@@ -1156,49 +1161,6 @@ done:
 	return (error);
 }
 
-static boolean_t
-vmmdev_mod_incr()
-{
-	ASSERT(MUTEX_HELD(&vmmdev_mtx));
-
-	if (vmmdev_inst_count == 0) {
-		/*
-		 * If the HVM portions of the module failed initialize on a
-		 * previous attempt, do not bother with a retry.  This tracker
-		 * is cleared on module attach, allowing subsequent attempts if
-		 * desired by the user.
-		 */
-		if (vmmdev_load_failure) {
-			return (B_FALSE);
-		}
-
-		if (!hvm_excl_hold(vmmdev_hvm_name)) {
-			return (B_FALSE);
-		}
-		if (vmm_mod_load() != 0) {
-			hvm_excl_rele(vmmdev_hvm_name);
-			vmmdev_load_failure = B_TRUE;
-			return (B_FALSE);
-		}
-	}
-
-	vmmdev_inst_count++;
-	return (B_TRUE);
-}
-
-static void
-vmmdev_mod_decr(void)
-{
-	ASSERT(MUTEX_HELD(&vmmdev_mtx));
-	ASSERT(vmmdev_inst_count > 0);
-
-	vmmdev_inst_count--;
-	if (vmmdev_inst_count == 0) {
-		VERIFY0(vmm_mod_unload());
-		hvm_excl_rele(vmmdev_hvm_name);
-	}
-}
-
 static vmm_softc_t *
 vmm_lookup(const char *name)
 {
@@ -1228,17 +1190,11 @@ vmmdev_do_vm_create(char *name, cred_t *cr)
 	}
 
 	mutex_enter(&vmmdev_mtx);
-	if (!vmmdev_mod_incr()) {
-		mutex_exit(&vmmdev_mtx);
-		return (ENXIO);
-	}
-
 	mutex_enter(&vmm_mtx);
 
 	/* Look for duplicates names */
 	if (vmm_lookup(name) != NULL) {
 		mutex_exit(&vmm_mtx);
-		vmmdev_mod_decr();
 		mutex_exit(&vmmdev_mtx);
 		return (EEXIST);
 	}
@@ -1249,7 +1205,6 @@ vmmdev_do_vm_create(char *name, cred_t *cr)
 		    sc = list_next(&vmmdev_list, sc)) {
 			if (sc->vmm_zone == curzone) {
 				mutex_exit(&vmm_mtx);
-				vmmdev_mod_decr();
 				mutex_exit(&vmmdev_mtx);
 				return (EINVAL);
 			}
@@ -1291,7 +1246,6 @@ vmmdev_do_vm_create(char *name, cred_t *cr)
 	ddi_remove_minor_node(vmm_dip, name);
 fail:
 	id_free(vmmdev_minors, minor);
-	vmmdev_mod_decr();
 	if (sc != NULL) {
 		ddi_soft_state_free(vmm_statep, minor);
 	}
@@ -1543,7 +1497,6 @@ vmm_do_vm_destroy_locked(vmm_softc_t *sc, boolean_t clean_zsd)
 	ddi_soft_state_free(vmm_statep, minor);
 	id_free(vmmdev_minors, minor);
 	(void) devfs_clean(pdip, NULL, DV_CLEAN_FORCE);
-	vmmdev_mod_decr();
 
 	return (0);
 }
@@ -1551,7 +1504,7 @@ vmm_do_vm_destroy_locked(vmm_softc_t *sc, boolean_t clean_zsd)
 int
 vmm_do_vm_destroy(vmm_softc_t *sc, boolean_t clean_zsd)
 {
-	int 		err;
+	int		err;
 
 	mutex_enter(&vmmdev_mtx);
 	mutex_enter(&vmm_mtx);
@@ -1657,7 +1610,7 @@ static int
 vmm_is_supported(intptr_t arg)
 {
 	int r;
-	char *msg;
+	const char *msg;
 
 	if (!vmm_is_intel())
 		return (ENXIO);
@@ -1877,66 +1830,86 @@ vmm_info(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **result)
 static int
 vmm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
-	switch (cmd) {
-	case DDI_ATTACH:
-		break;
-	default:
+	sdev_plugin_hdl_t sph;
+	hma_reg_t *reg = NULL;
+	boolean_t vmm_loaded = B_FALSE;
+
+	if (cmd != DDI_ATTACH) {
+		return (DDI_FAILURE);
+	}
+
+	mutex_enter(&vmmdev_mtx);
+	/* Ensure we are not already attached. */
+	if (vmm_dip != NULL) {
+		mutex_exit(&vmmdev_mtx);
 		return (DDI_FAILURE);
 	}
 
 	vmm_sol_glue_init();
+	vmm_arena_init();
 
-	/*
-	 * Create control node.  Other nodes will be created on demand.
-	 */
+	if ((reg = hma_register(vmmdev_hvm_name)) == NULL) {
+		goto fail;
+	} else if (vmm_mod_load() != 0) {
+		goto fail;
+	}
+	vmm_loaded = B_TRUE;
+
+	/* Create control node.  Other nodes will be created on demand. */
 	if (ddi_create_minor_node(dip, "ctl", S_IFCHR,
 	    VMM_CTL_MINOR, DDI_PSEUDO, 0) != 0) {
-		return (DDI_FAILURE);
+		goto fail;
 	}
 
-	if ((vmm_sdev_hdl = sdev_plugin_register("vmm", &vmm_sdev_ops,
-	    NULL)) == NULL) {
+	if ((sph = sdev_plugin_register("vmm", &vmm_sdev_ops, NULL)) == NULL) {
 		ddi_remove_minor_node(dip, NULL);
-		dip = NULL;
-		return (DDI_FAILURE);
+		goto fail;
 	}
 
 	ddi_report_dev(dip);
-
-	vmm_arena_init();
-
-	vmmdev_load_failure = B_FALSE;
+	vmm_hma_reg = reg;
+	vmm_sdev_hdl = sph;
 	vmm_dip = dip;
-
+	mutex_exit(&vmmdev_mtx);
 	return (DDI_SUCCESS);
+
+fail:
+	if (vmm_loaded) {
+		VERIFY0(vmm_mod_unload());
+	}
+	if (reg != NULL) {
+		hma_unregister(reg);
+	}
+	vmm_sol_glue_cleanup();
+	vmm_arena_fini();
+	mutex_exit(&vmmdev_mtx);
+	return (DDI_FAILURE);
 }
 
 static int
 vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 {
-	switch (cmd) {
-	case DDI_DETACH:
-		break;
-	default:
+	if (cmd != DDI_DETACH) {
 		return (DDI_FAILURE);
 	}
 
-	/* Ensure that all resources have been cleaned up */
-	mutex_enter(&vmmdev_mtx);
-
-	if (vmmdev_inst_count != 0) {
-		mutex_exit(&vmmdev_mtx);
+	/*
+	 * Ensure that all resources have been cleaned up.
+	 *
+	 * To prevent a deadlock with iommu_cleanup() we'll fail the detach if
+	 * vmmdev_mtx is already held. We can't wait for vmmdev_mtx with our
+	 * devinfo locked as iommu_cleanup() tries to recursively lock each
+	 * devinfo, including our own, while holding vmmdev_mtx.
+	 */
+	if (mutex_tryenter(&vmmdev_mtx) == 0)
 		return (DDI_FAILURE);
-	}
 
 	mutex_enter(&vmm_mtx);
-
 	if (!list_is_empty(&vmmdev_list)) {
 		mutex_exit(&vmm_mtx);
 		mutex_exit(&vmmdev_mtx);
 		return (DDI_FAILURE);
 	}
-
 	mutex_exit(&vmm_mtx);
 
 	if (vmm_sdev_hdl != NULL && sdev_plugin_unregister(vmm_sdev_hdl) != 0) {
@@ -1948,6 +1921,10 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	/* Remove the control node. */
 	ddi_remove_minor_node(dip, "ctl");
 	vmm_dip = NULL;
+
+	VERIFY0(vmm_mod_unload());
+	hma_unregister(vmm_hma_reg);
+	vmm_hma_reg = NULL;
 	vmm_sol_glue_cleanup();
 	vmm_arena_fini();
 

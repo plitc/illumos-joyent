@@ -73,9 +73,6 @@ void			exit(int code);
 static void		i386_zfs_probe(void);
 #endif
 
-/* from vers.c */
-extern	char bootprog_info[];
-
 /* XXX debugging */
 extern char end[];
 
@@ -195,11 +192,7 @@ main(void)
     setenv("LINES", "24", 1);			/* optional */
     setenv("COLUMNS", "80", 1);			/* optional */
 
-    if (bi_checkcpu())
-	setenv("ISADIR", "amd64", 1);
-    else
-	setenv("ISADIR", "", 1);
-
+    bi_isadir();
     bios_getsmap();
 
     interact(NULL);
@@ -219,7 +212,6 @@ extract_currdev(void)
 {
     struct i386_devdesc		new_currdev;
 #ifdef LOADER_ZFS_SUPPORT
-    char			buf[20];
     struct zfs_boot_args	*zargs;
 #endif
     int				biosdev = -1;
@@ -255,12 +247,6 @@ extract_currdev(void)
 	    /* sufficient data is provided */
 	    new_currdev.d_kind.zfs.pool_guid = zargs->pool;
 	    new_currdev.d_kind.zfs.root_guid = zargs->root;
-	    if (zargs->size >= sizeof(*zargs) && zargs->primary_vdev != 0) {
-		sprintf(buf, "%llu", zargs->primary_pool);
-		setenv("vfs.zfs.boot.primary_pool", buf, 1);
-		sprintf(buf, "%llu", zargs->primary_vdev);
-		setenv("vfs.zfs.boot.primary_vdev", buf, 1);
-	    }
 	} else {
 	    /* old style zfsboot block */
 	    new_currdev.d_kind.zfs.pool_guid = kargs->zfspool;
@@ -339,65 +325,6 @@ command_heap(int argc, char *argv[])
     return(CMD_OK);
 }
 
-#ifdef LOADER_ZFS_SUPPORT
-COMMAND_SET(lszfs, "lszfs", "list child datasets of a zfs dataset",
-    command_lszfs);
-
-static int
-command_lszfs(int argc, char *argv[])
-{
-    int err;
-
-    if (argc != 2) {
-	command_errmsg = "wrong number of arguments";
-	return (CMD_ERROR);
-    }
-
-    err = zfs_list(argv[1]);
-    if (err != 0) {
-	command_errmsg = strerror(err);
-	return (CMD_ERROR);
-    }
-
-    return (CMD_OK);
-}
-
-#ifdef __FreeBSD__
-COMMAND_SET(reloadbe, "reloadbe", "refresh the list of ZFS Boot Environments",
-    command_reloadbe);
-
-static int
-command_reloadbe(int argc, char *argv[])
-{
-    int err;
-    char *root;
-
-    if (argc > 2) {
-	command_errmsg = "wrong number of arguments";
-	return (CMD_ERROR);
-    }
-
-    if (argc == 2) {
-	err = zfs_bootenv(argv[1]);
-    } else {
-	root = getenv("zfs_be_root");
-	if (root == NULL) {
-	    /* There does not appear to be a ZFS pool here, exit without error */
-	    return (CMD_OK);
-	}
-	err = zfs_bootenv(getenv("zfs_be_root"));
-    }
-
-    if (err != 0) {
-	command_errmsg = strerror(err);
-	return (CMD_ERROR);
-    }
-
-    return (CMD_OK);
-}
-#endif /* __FreeBSD__ */
-#endif
-
 /* ISA bus access functions for PnP. */
 static int
 isa_inb(int port)
@@ -413,7 +340,6 @@ isa_outb(int port, int value)
     outb(port, value);
 }
 
-#ifdef LOADER_ZFS_SUPPORT
 static void
 i386_zfs_probe(void)
 {
@@ -427,18 +353,9 @@ i386_zfs_probe(void)
     for (unit = 0; unit < MAXBDDEV; unit++) {
 	if (bd_unit2bios(unit) == -1)
 	    break;
+	if (bd_unit2bios(unit) < 0x80)
+	    continue;
 	sprintf(devname, "disk%d:", unit);
 	zfs_probe_dev(devname, NULL);
     }
 }
-
-uint64_t
-ldi_get_size(void *priv)
-{
-	int fd = (uintptr_t) priv;
-	uint64_t size;
-
-	ioctl(fd, DIOCGMEDIASIZE, &size);
-	return (size);
-}
-#endif

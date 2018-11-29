@@ -102,7 +102,7 @@
  *        |---* ring worker thread begins execution	|
  *        |						|
  *        +-------------------------------------------->+
- *        |	      | 				^
+ *        |	      |					^
  *        |	      |
  *        |	      *	If ring shutdown is requested (by ioctl or impending
  *        |		bhyve process death) while the worker thread is
@@ -207,6 +207,23 @@
  * slow path for interrupts.  It will poll(2) the viona handle, receiving
  * notification when ring events necessitate the assertion of an interrupt.
  *
+ *
+ * ---------------
+ * Nethook Support
+ * ---------------
+ *
+ * Viona provides four nethook events that consumers (e.g. ipf) can hook into
+ * to intercept packets as they go up or down the stack.  Unfortunately,
+ * the nethook framework does not understand raw packets, so we can only
+ * generate events (in, out) for IPv4 and IPv6 packets.  At driver attach,
+ * we register callbacks with the neti (netinfo) module that will be invoked
+ * for each netstack already present, as well as for any additional netstack
+ * instances created as the system operates.  These callbacks will
+ * register/unregister the hooks with the nethook framework for each
+ * netstack instance.  This registration occurs prior to creating any
+ * viona instances for a given netstack, and the unregistration for a netstack
+ * instance occurs after all viona instances of the netstack instance have
+ * been deleted.
  */
 
 #include <sys/conf.h>
@@ -220,15 +237,22 @@
 #include <sys/strsubr.h>
 #include <sys/strsun.h>
 #include <vm/seg_kmem.h>
+#include <sys/ht.h>
 
 #include <sys/pattr.h>
 #include <sys/dls.h>
 #include <sys/dlpi.h>
+#include <sys/hook.h>
+#include <sys/hook_event.h>
+#include <sys/list.h>
 #include <sys/mac_client.h>
 #include <sys/mac_provider.h>
 #include <sys/mac_client_priv.h>
+#include <sys/neti.h>
 #include <sys/vlan.h>
 #include <inet/ip.h>
+#include <inet/ip_impl.h>
+#include <inet/tcp.h>
 
 #include <sys/vmm_drv.h>
 #include <sys/viona_io.h>
@@ -240,6 +264,8 @@
 #define	VIONA_NAME		"Virtio Network Accelerator"
 #define	VIONA_CTL_MINOR		0
 #define	VIONA_CLI_NAME		"viona"		/* MAC client name */
+#define	VIONA_MAX_HDRS_LEN	(sizeof (struct ether_vlan_header) + \
+	IP_MAX_HDR_LENGTH + TCP_MAX_HDR_LENGTH)
 
 #define	VTNET_MAXSEGS		32
 
@@ -253,27 +279,36 @@
 #define	VIRTIO_NET_HDR_F_NEEDS_CSUM	(1 << 0)
 #define	VIRTIO_NET_HDR_F_DATA_VALID	(1 << 1)
 
+#define	VIRTIO_NET_HDR_GSO_NONE		0
+#define	VIRTIO_NET_HDR_GSO_TCPV4	1
 
 #define	VRING_AVAIL_F_NO_INTERRUPT	1
 
 #define	VRING_USED_F_NO_NOTIFY		1
 
 #define	BCM_NIC_DRIVER		"bnxe"
+
 /*
- * Host capabilities
+ * Feature bits. See section 5.1.3 of the VIRTIO 1.0 spec.
  */
-#define	VIRTIO_NET_F_CSUM	(1 <<  0)
-#define	VIRTIO_NET_F_GUEST_CSUM	(1 <<  1)
-#define	VIRTIO_NET_F_MAC	(1 <<  5) /* host supplies MAC */
+#define	VIRTIO_NET_F_CSUM	(1 << 0)
+#define	VIRTIO_NET_F_GUEST_CSUM	(1 << 1)
+#define	VIRTIO_NET_F_MAC	(1 << 5) /* host supplies MAC */
+#define	VIRTIO_NET_F_GUEST_TSO4	(1 << 7) /* guest can accept TSO */
+#define	VIRTIO_NET_F_HOST_TSO4	(1 << 11) /* host can accept TSO */
 #define	VIRTIO_NET_F_MRG_RXBUF	(1 << 15) /* host can merge RX buffers */
 #define	VIRTIO_NET_F_STATUS	(1 << 16) /* config status field available */
 #define	VIRTIO_F_RING_NOTIFY_ON_EMPTY	(1 << 24)
 #define	VIRTIO_F_RING_INDIRECT_DESC	(1 << 28)
 #define	VIRTIO_F_RING_EVENT_IDX		(1 << 29)
 
+/*
+ * Host capabilities.
+ */
 #define	VIONA_S_HOSTCAPS	(	\
 	VIRTIO_NET_F_GUEST_CSUM |	\
 	VIRTIO_NET_F_MAC |		\
+	VIRTIO_NET_F_GUEST_TSO4 |	\
 	VIRTIO_NET_F_MRG_RXBUF |	\
 	VIRTIO_NET_F_STATUS |		\
 	VIRTIO_F_RING_NOTIFY_ON_EMPTY |	\
@@ -343,6 +378,8 @@ struct viona_link;
 typedef struct viona_link viona_link_t;
 struct viona_desb;
 typedef struct viona_desb viona_desb_t;
+struct viona_net;
+typedef struct viona_neti viona_neti_t;
 
 enum viona_ring_state {
 	VRS_RESET	= 0x0,	/* just allocated or reset */
@@ -358,6 +395,11 @@ enum viona_ring_state_flags {
 #define	VRING_NEED_BAIL(ring, proc)					\
 		(((ring)->vr_state_flags & VRSF_REQ_STOP) != 0 ||	\
 		((proc)->p_flag & SEXITING) != 0)
+
+#define	VNETHOOK_INTERESTED_IN(neti) \
+	(neti)->vni_nethook.vnh_event_in.he_interested
+#define	VNETHOOK_INTERESTED_OUT(neti) \
+	(neti)->vni_nethook.vnh_event_out.he_interested
 
 typedef struct viona_vring {
 	viona_link_t	*vr_link;
@@ -403,6 +445,7 @@ typedef struct viona_vring {
 		uint64_t	rs_indir_bad_next;
 		uint64_t	rs_no_space;
 		uint64_t	rs_too_many_desc;
+		uint64_t	rs_desc_bad_len;
 
 		uint64_t	rs_bad_ring_addr;
 
@@ -416,6 +459,9 @@ typedef struct viona_vring {
 		uint64_t	rs_rx_pad_short;
 		uint64_t	rs_too_short;
 		uint64_t	rs_tx_absent;
+
+		uint64_t	rs_rx_hookdrop;
+		uint64_t	rs_tx_hookdrop;
 	} vr_stats;
 } viona_vring_t;
 
@@ -437,6 +483,32 @@ struct viona_link {
 	mac_client_handle_t	l_mch;
 
 	pollhead_t		l_pollhead;
+
+	viona_neti_t		*l_neti;
+};
+
+typedef struct viona_nethook {
+	net_handle_t		vnh_neti;
+	hook_family_t		vnh_family;
+	hook_event_t		vnh_event_in;
+	hook_event_t		vnh_event_out;
+	hook_event_token_t	vnh_token_in;
+	hook_event_token_t	vnh_token_out;
+	boolean_t		vnh_hooked;
+} viona_nethook_t;
+
+struct viona_neti {
+	list_node_t		vni_node;
+
+	netid_t			vni_netid;
+	zoneid_t		vni_zid;
+
+	viona_nethook_t		vni_nethook;
+
+	kmutex_t		vni_lock;	/* Protects remaining members */
+	kcondvar_t		vni_ref_change; /* Protected by vni_lock */
+	uint_t			vni_ref;	/* Protected by vni_lock */
+	list_t			vni_dev_list;	/* Protected by vni_lock */
 };
 
 struct viona_desb {
@@ -445,11 +517,13 @@ struct viona_desb {
 	uint_t			d_ref;
 	uint32_t		d_len;
 	uint16_t		d_cookie;
+	uchar_t			*d_headers;
 };
 
 typedef struct viona_soft_state {
 	kmutex_t		ss_lock;
 	viona_link_t		*ss_link;
+	list_node_t		ss_node;
 } viona_soft_state_t;
 
 typedef struct used_elem {
@@ -461,6 +535,18 @@ static void			*viona_state;
 static dev_info_t		*viona_dip;
 static id_space_t		*viona_minors;
 static mblk_t			*viona_vlan_pad_mp;
+
+/*
+ * Global linked list of viona_neti_ts.  Access is protected by viona_neti_lock
+ */
+static kmutex_t			viona_neti_lock;
+static list_t			viona_neti_list;
+
+/*
+ * viona_neti is allocated and initialized during attach, and read-only
+ * until detach (where it's also freed)
+ */
+static net_instance_t		*viona_neti;
 
 /*
  * copy tx mbufs from virtio ring to avoid necessitating a wait for packet
@@ -502,6 +588,15 @@ static void viona_intr_ring(viona_vring_t *);
 static void viona_desb_release(viona_desb_t *);
 static void viona_rx(void *, mac_resource_handle_t, mblk_t *, boolean_t);
 static void viona_tx(viona_link_t *, viona_vring_t *);
+
+static viona_neti_t *viona_neti_lookup_by_zid(zoneid_t);
+static void viona_neti_rele(viona_neti_t *);
+
+static void *viona_neti_create(const netid_t);
+static void viona_neti_shutdown(const netid_t, void *);
+static void viona_neti_destroy(const netid_t, void *);
+
+static int viona_hook(viona_link_t *, viona_vring_t *, mblk_t **, boolean_t);
 
 static struct cb_ops viona_cb_ops = {
 	viona_open,
@@ -651,6 +746,21 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	viona_dip = dip;
 	ddi_report_dev(viona_dip);
 
+	mutex_init(&viona_neti_lock, NULL, MUTEX_DRIVER, NULL);
+	list_create(&viona_neti_list, sizeof (viona_neti_t),
+	    offsetof(viona_neti_t, vni_node));
+
+	/* This can only fail if NETINFO_VERSION is wrong */
+	viona_neti = net_instance_alloc(NETINFO_VERSION);
+	VERIFY(viona_neti != NULL);
+
+	viona_neti->nin_name = "viona";
+	viona_neti->nin_create = viona_neti_create;
+	viona_neti->nin_shutdown = viona_neti_shutdown;
+	viona_neti->nin_destroy = viona_neti_destroy;
+	/* This can only fail if we've registered ourselves multiple times */
+	VERIFY3S(net_instance_register(viona_neti), ==, DDI_SUCCESS);
+
 	return (DDI_SUCCESS);
 }
 
@@ -672,6 +782,14 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	id_space_destroy(viona_minors);
 	ddi_remove_minor_node(viona_dip, NULL);
 	viona_dip = NULL;
+
+	/* This can only fail if we've not registered previously */
+	VERIFY3S(net_instance_unregister(viona_neti), ==, DDI_SUCCESS);
+	net_instance_free(viona_neti);
+	viona_neti = NULL;
+
+	list_destroy(&viona_neti_list);
+	mutex_destroy(&viona_neti_lock);
 
 	return (DDI_SUCCESS);
 }
@@ -733,6 +851,7 @@ viona_close(dev_t dev, int flag, int otype, cred_t *credp)
 	}
 
 	VERIFY0(viona_ioc_delete(ss, B_TRUE));
+	VERIFY(!list_link_active(&ss->ss_node));
 	ddi_soft_state_free(viona_state, minor);
 	id_free(viona_minors, minor);
 
@@ -781,6 +900,13 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 			break;
 		}
 		val &= (VIONA_S_HOSTCAPS | link->l_features_hw);
+
+		if ((val & VIRTIO_NET_F_CSUM) == 0)
+			val &= ~VIRTIO_NET_F_HOST_TSO4;
+
+		if ((val & VIRTIO_NET_F_GUEST_CSUM) == 0)
+			val &= ~VIRTIO_NET_F_GUEST_TSO4;
+
 		link->l_features = val;
 		break;
 	case VNA_IOC_RING_INIT:
@@ -853,6 +979,7 @@ viona_get_mac_capab(viona_link_t *link)
 {
 	mac_handle_t mh = link->l_mh;
 	uint32_t cap = 0;
+	mac_capab_lso_t lso_cap;
 
 	link->l_features_hw = 0;
 	if (mac_capab_get(mh, MAC_CAPAB_HCKSUM, &cap)) {
@@ -865,6 +992,19 @@ viona_get_mac_capab(viona_link_t *link)
 		}
 		link->l_cap_csum = cap;
 	}
+
+	if ((link->l_features_hw & VIRTIO_NET_F_CSUM) &&
+	    mac_capab_get(mh, MAC_CAPAB_LSO, &lso_cap)) {
+		/*
+		 * Virtio doesn't allow for negotiating a maximum LSO
+		 * packet size. We have to assume that the guest may
+		 * send a maximum length IP packet. Make sure the
+		 * underlying MAC can handle an LSO of this size.
+		 */
+		if ((lso_cap.lso_flags & LSO_TX_BASIC_TCP_IPV4) &&
+		    lso_cap.lso_basic_tcp_ipv4.lso_max >= IP_MAXPACKET)
+			link->l_features_hw |= VIRTIO_NET_F_HOST_TSO4;
+	}
 }
 
 static int
@@ -876,6 +1016,8 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 	int		err = 0;
 	file_t		*fp;
 	vmm_hold_t	*hold = NULL;
+	viona_neti_t	*nip = NULL;
+	zoneid_t	zid;
 
 	ASSERT(MUTEX_NOT_HELD(&ss->ss_lock));
 
@@ -883,9 +1025,21 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 		return (EFAULT);
 	}
 
+	zid = crgetzoneid(cr);
+	nip = viona_neti_lookup_by_zid(zid);
+	if (nip == NULL) {
+		return (EIO);
+	}
+
+	if (!nip->vni_nethook.vnh_hooked) {
+		viona_neti_rele(nip);
+		return (EIO);
+	}
+
 	mutex_enter(&ss->ss_lock);
 	if (ss->ss_link != NULL) {
 		mutex_exit(&ss->ss_lock);
+		viona_neti_rele(nip);
 		return (EEXIST);
 	}
 
@@ -917,11 +1071,18 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 		goto bail;
 	}
 
+	link->l_neti = nip;
+
 	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_RX]);
 	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_TX]);
 	ss->ss_link = link;
 
 	mutex_exit(&ss->ss_lock);
+
+	mutex_enter(&nip->vni_lock);
+	list_insert_tail(&nip->vni_dev_list, ss);
+	mutex_exit(&nip->vni_lock);
+
 	return (0);
 
 bail:
@@ -937,6 +1098,7 @@ bail:
 	if (hold != NULL) {
 		vmm_drv_rele(hold);
 	}
+	viona_neti_rele(nip);
 
 	mutex_exit(&ss->ss_lock);
 	return (err);
@@ -946,6 +1108,7 @@ static int
 viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 {
 	viona_link_t *link;
+	viona_neti_t *nip = NULL;
 
 	mutex_enter(&ss->ss_lock);
 	if ((link = ss->ss_link) == NULL) {
@@ -996,11 +1159,20 @@ viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 		link->l_vm_hold = NULL;
 	}
 
+	nip = link->l_neti;
+	link->l_neti = NULL;
+
 	viona_ring_free(&link->l_vrings[VIONA_VQ_RX]);
 	viona_ring_free(&link->l_vrings[VIONA_VQ_TX]);
 	pollhead_clean(&link->l_pollhead);
 	ss->ss_link = NULL;
 	mutex_exit(&ss->ss_lock);
+
+	mutex_enter(&nip->vni_lock);
+	list_remove(&nip->vni_dev_list, ss);
+	mutex_exit(&nip->vni_lock);
+
+	viona_neti_rele(nip);
 
 	kmem_free(link, sizeof (viona_link_t));
 	return (0);
@@ -1023,6 +1195,19 @@ viona_ring_alloc(viona_link_t *link, viona_vring_t *ring)
 	cv_init(&ring->vr_cv, NULL, CV_DRIVER, NULL);
 	mutex_init(&ring->vr_a_mutex, NULL, MUTEX_DRIVER, NULL);
 	mutex_init(&ring->vr_u_mutex, NULL, MUTEX_DRIVER, NULL);
+}
+
+static void
+viona_ring_desb_free(viona_vring_t *ring)
+{
+	viona_desb_t *dp = ring->vr_desb;
+
+	for (uint_t i = 0; i < ring->vr_size; i++, dp++) {
+		kmem_free(dp->d_headers, VIONA_MAX_HDRS_LEN);
+	}
+
+	kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
+	ring->vr_desb = NULL;
 }
 
 static void
@@ -1135,16 +1320,17 @@ viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
 
 	/* Allocate desb handles for TX ring if packet copying not disabled */
 	if (kri.ri_index == VIONA_VQ_TX && !viona_force_copy_tx_mblks) {
-		viona_desb_t *desb, *dp;
+		viona_desb_t *dp;
 
-		desb = kmem_zalloc(sizeof (viona_desb_t) * cnt, KM_SLEEP);
-		dp = desb;
+		dp = kmem_zalloc(sizeof (viona_desb_t) * cnt, KM_SLEEP);
+		ring->vr_desb = dp;
 		for (uint_t i = 0; i < cnt; i++, dp++) {
 			dp->d_frtn.free_func = viona_desb_release;
 			dp->d_frtn.free_arg = (void *)dp;
 			dp->d_ring = ring;
+			dp->d_headers = kmem_zalloc(VIONA_MAX_HDRS_LEN,
+			    KM_SLEEP);
 		}
-		ring->vr_desb = desb;
 	}
 
 	/* Zero out MSI-X configuration */
@@ -1167,8 +1353,7 @@ viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
 
 fail:
 	if (ring->vr_desb != NULL) {
-		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * cnt);
-		ring->vr_desb = NULL;
+		viona_ring_desb_free(ring);
 	}
 	ring->vr_size = 0;
 	ring->vr_mask = 0;
@@ -1318,6 +1503,8 @@ viona_worker_rx(viona_vring_t *ring, viona_link_t *link)
 {
 	proc_t *p = ttoproc(curthread);
 
+	thread_vsetname(curthread, "viona_rx_%p", ring);
+
 	ASSERT(MUTEX_HELD(&ring->vr_lock));
 	ASSERT3U(ring->vr_state, ==, VRS_RUN);
 
@@ -1350,6 +1537,8 @@ static void
 viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
 {
 	proc_t *p = ttoproc(curthread);
+
+	thread_vsetname(curthread, "viona_tx_%p", ring);
 
 	ASSERT(MUTEX_HELD(&ring->vr_lock));
 	ASSERT3U(ring->vr_state, ==, VRS_RUN);
@@ -1413,8 +1602,7 @@ viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
 
 	/* Free any desb resources before the ring is completely stopped */
 	if (ring->vr_desb != NULL) {
-		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
-		ring->vr_desb = NULL;
+		viona_ring_desb_free(ring);
 	}
 }
 
@@ -1462,8 +1650,7 @@ cleanup:
 	/* Free any desb resources before the ring is completely stopped */
 	if (ring->vr_desb != NULL) {
 		VERIFY(ring->vr_xfer_outstanding == 0);
-		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
-		ring->vr_desb = NULL;
+		viona_ring_desb_free(ring);
 	}
 
 	ring->vr_cur_aidx = 0;
@@ -1582,6 +1769,13 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 
 		vdir = ring->vr_descr[next];
 		if ((vdir.vd_flags & VRING_DESC_F_INDIRECT) == 0) {
+			if (vdir.vd_len == 0) {
+				VIONA_PROBE2(desc_bad_len,
+				    viona_vring_t *, ring,
+				    uint32_t, vdir.vd_len);
+				VIONA_RING_STAT_INCR(ring, desc_bad_len);
+				goto bail;
+			}
 			buf = viona_gpa2kva(link, vdir.vd_addr, vdir.vd_len);
 			if (buf == NULL) {
 				VIONA_PROBE_BAD_RING_ADDR(ring, vdir.vd_addr);
@@ -1626,6 +1820,13 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 					    viona_vring_t *, ring);
 					VIONA_RING_STAT_INCR(ring,
 					    indir_bad_nest);
+					goto bail;
+				} else if (vp.vd_len == 0) {
+					VIONA_PROBE2(desc_bad_len,
+					    viona_vring_t *, ring,
+					    uint32_t, vp.vd_len);
+					VIONA_RING_STAT_INCR(ring,
+					    desc_bad_len);
 					goto bail;
 				}
 				buf = viona_gpa2kva(link, vp.vd_addr,
@@ -1750,7 +1951,7 @@ viona_copy_mblk(const mblk_t *mp, size_t seek, caddr_t buf, size_t len,
 
 	/* Seek past already-consumed data */
 	while (seek > 0 && mp != NULL) {
-		size_t chunk = MBLKL(mp);
+		const size_t chunk = MBLKL(mp);
 
 		if (chunk > seek) {
 			off = seek;
@@ -1769,17 +1970,31 @@ viona_copy_mblk(const mblk_t *mp, size_t seek, caddr_t buf, size_t len,
 		buf += to_copy;
 		len -= to_copy;
 
+		/*
+		 * If all the remaining data in the mblk_t was copied, move on
+		 * to the next one in the chain.  Any seek offset applied to
+		 * the first mblk copy is zeroed out for subsequent operations.
+		 */
+		if (chunk == to_copy) {
+			mp = mp->b_cont;
+			off = 0;
+		}
+#ifdef DEBUG
+		else {
+			/*
+			 * The only valid reason for the copy to consume less
+			 * than the entire contents of the mblk_t is because
+			 * the output buffer has been filled.
+			 */
+			ASSERT0(len);
+		}
+#endif
+
 		/* Go no further if the buffer has been filled */
 		if (len == 0) {
 			break;
 		}
 
-		/*
-		 * Any offset into the initially chosen mblk_t buffer is
-		 * consumed on the first copy operation.
-		 */
-		off = 0;
-		mp = mp->b_cont;
 	}
 	*end = (mp == NULL);
 	return (copied);
@@ -1796,6 +2011,7 @@ viona_recv_plain(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	size_t len, copied = 0;
 	caddr_t buf = NULL;
 	boolean_t end = B_FALSE;
+	const uint32_t features = ring->vr_link->l_features;
 
 	ASSERT(msz >= MIN_BUF_SIZE);
 
@@ -1850,8 +2066,14 @@ viona_recv_plain(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	copied += hdr_sz;
 
 	/* Add chksum bits, if needed */
-	if ((ring->vr_link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
+	if ((features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
 		uint32_t cksum_flags;
+
+		if (((features & VIRTIO_NET_F_GUEST_TSO4) != 0) &&
+		    ((DB_CKSUMFLAGS(mp) & HW_LSO) != 0)) {
+			hdr->vrh_gso_type |= VIRTIO_NET_HDR_GSO_TCPV4;
+			hdr->vrh_gso_size = DB_LSOMSS(mp);
+		}
 
 		mac_hcksum_get((mblk_t *)mp, NULL, NULL, NULL, NULL,
 		    &cksum_flags);
@@ -1885,6 +2107,7 @@ viona_recv_merged(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	struct virtio_net_mrgrxhdr *hdr = NULL;
 	const size_t hdr_sz = sizeof (struct virtio_net_mrgrxhdr);
 	boolean_t end = B_FALSE;
+	const uint32_t features = ring->vr_link->l_features;
 
 	ASSERT(msz >= MIN_BUF_SIZE);
 
@@ -1990,8 +2213,14 @@ viona_recv_merged(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 	}
 
 	/* Add chksum bits, if needed */
-	if ((ring->vr_link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
+	if ((features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
 		uint32_t cksum_flags;
+
+		if (((features & VIRTIO_NET_F_GUEST_TSO4) != 0) &&
+		    ((DB_CKSUMFLAGS(mp) & HW_LSO) != 0)) {
+			hdr->vrh_gso_type |= VIRTIO_NET_HDR_GSO_TCPV4;
+			hdr->vrh_gso_size = DB_LSOMSS(mp);
+		}
 
 		mac_hcksum_get((mblk_t *)mp, NULL, NULL, NULL, NULL,
 		    &cksum_flags);
@@ -2036,7 +2265,28 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 	mblk_t *mpdrop = NULL, **mpdrop_prevp = &mpdrop;
 	const boolean_t do_merge =
 	    ((link->l_features & VIRTIO_NET_F_MRG_RXBUF) != 0);
+	const boolean_t guest_csum =
+	    ((link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0);
+	const boolean_t guest_tso4 =
+	    ((link->l_features & VIRTIO_NET_F_GUEST_TSO4) != 0);
+
 	size_t nrx = 0, ndrop = 0;
+
+	/*
+	 * The mac_hw_emul() function, by design, doesn't predicate on
+	 * HW_LOCAL_MAC. Since we are in Rx context we know that any
+	 * LSO packet must also be from a same-machine sender. We take
+	 * advantage of that and forgoe writing a manual loop to
+	 * predicate on HW_LOCAL_MAC.
+	 *
+	 * For checksum emulation we need to predicate on HW_LOCAL_MAC
+	 * to avoid calling mac_hw_emul() on packets that don't need
+	 * it (thanks to the fact that HCK_IPV4_HDRCKSUM and
+	 * HCK_IPV4_HDRCKSUM_OK use the same value). Therefore, we do
+	 * the checksum emulation in the second loop.
+	 */
+	if (!guest_tso4)
+		mac_hw_emul(&mp, NULL, NULL, MAC_LSO_EMUL);
 
 	while (mp != NULL) {
 		mblk_t *next, *pad = NULL;
@@ -2045,7 +2295,50 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 
 		next = mp->b_next;
 		mp->b_next = NULL;
+
+		if (DB_CKSUMFLAGS(mp) & HW_LOCAL_MAC) {
+			/*
+			 * The VIRTIO_NET_HDR_F_DATA_VALID flag only
+			 * covers the ULP checksum -- so we still have
+			 * to populate the IP header checksum.
+			 */
+			if (guest_csum) {
+				mac_hw_emul(&mp, NULL, NULL, MAC_IPCKSUM_EMUL);
+			} else {
+				mac_hw_emul(&mp, NULL, NULL, MAC_HWCKSUM_EMUL);
+			}
+
+			if (mp == NULL) {
+				mp = next;
+				continue;
+			}
+		}
+
 		size = msgsize(mp);
+
+		/*
+		 * We treat both a 'drop' response and errors the same here
+		 * and put the packet on the drop chain.  As packets may be
+		 * subject to different actions in ipf (which do not all
+		 * return the same set of error values), an error processing
+		 * one packet doesn't mean the next packet will also generate
+		 * an error.
+		 */
+		if (VNETHOOK_INTERESTED_IN(link->l_neti) &&
+		    viona_hook(link, ring, &mp, B_FALSE) != 0) {
+			if (mp != NULL) {
+				*mpdrop_prevp = mp;
+				mpdrop_prevp = &mp->b_next;
+			} else {
+				/*
+				 * If the hook consumer (e.g. ipf) already
+				 * freed the mblk_t, update the drop count now.
+				 */
+				ndrop++;
+			}
+			mp = next;
+			continue;
+		}
 
 		/*
 		 * Ethernet frames are expected to be padded out in order to
@@ -2105,6 +2398,14 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 		}
 
 pad_drop:
+		/*
+		 * While an error during rx processing
+		 * (viona_recv_{merged,plain}) does not free mp on error,
+		 * hook processing might or might not free mp.  Handle either
+		 * scenario -- if mp is not yet free, it is queued up and
+		 * freed after the guest has been notified.  If mp is
+		 * already NULL, just proceed on.
+		 */
 		if (err != 0) {
 			*mpdrop_prevp = mp;
 			mpdrop_prevp = &mp->b_next;
@@ -2191,28 +2492,6 @@ viona_desb_release(viona_desb_t *dp)
 	mutex_exit(&ring->vr_lock);
 }
 
-static int
-viona_mb_get_uint8(mblk_t *mp, off_t off, uint8_t *out)
-{
-	size_t mpsize;
-	uint8_t *bp;
-
-	mpsize = msgsize(mp);
-	if (off + sizeof (uint8_t) > mpsize)
-		return (-1);
-
-	mpsize = MBLKL(mp);
-	while (off >= mpsize) {
-		mp = mp->b_cont;
-		off -= mpsize;
-		mpsize = MBLKL(mp);
-	}
-
-	bp = mp->b_rptr + off;
-	*out = *bp;
-	return (0);
-}
-
 static boolean_t
 viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
     mblk_t *mp, uint32_t len)
@@ -2221,15 +2500,22 @@ viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
 	const struct ether_header *eth;
 	uint_t eth_len = sizeof (struct ether_header);
 	ushort_t ftype;
+	ipha_t *ipha = NULL;
 	uint8_t ipproto = IPPROTO_NONE; /* NONE is not exactly right, but ok */
+	uint16_t flags = 0;
 
-	eth = (const struct ether_header *)mp->b_rptr;
 	if (MBLKL(mp) < sizeof (*eth)) {
 		/* Buffers shorter than an ethernet header are hopeless */
 		return (B_FALSE);
 	}
 
+	/*
+	 * This is guaranteed to be safe thanks to the header copying
+	 * done in viona_tx().
+	 */
+	eth = (const struct ether_header *)mp->b_rptr;
 	ftype = ntohs(eth->ether_type);
+
 	if (ftype == ETHERTYPE_VLAN) {
 		const struct ether_vlan_header *veth;
 
@@ -2240,14 +2526,78 @@ viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
 	}
 
 	if (ftype == ETHERTYPE_IP) {
-		const size_t off = offsetof(ipha_t, ipha_protocol) + eth_len;
+		ipha = (ipha_t *)(mp->b_rptr + eth_len);
 
-		(void) viona_mb_get_uint8(mp, off, &ipproto);
+		ipproto = ipha->ipha_protocol;
 	} else if (ftype == ETHERTYPE_IPV6) {
-		const size_t off = offsetof(ip6_t, ip6_nxt) + eth_len;
+		ip6_t *ip6h = (ip6_t *)(mp->b_rptr + eth_len);
 
-		(void) viona_mb_get_uint8(mp, off, &ipproto);
+		ipproto = ip6h->ip6_nxt;
 	}
+
+	/*
+	 * We ignore hdr_len because the spec says it can't be
+	 * trusted. Besides, our own stack will determine the header
+	 * boundary.
+	 */
+	if ((link->l_cap_csum & HCKSUM_INET_PARTIAL) != 0 &&
+	    (hdr->vrh_gso_type & VIRTIO_NET_HDR_GSO_TCPV4) != 0 &&
+	    ftype == ETHERTYPE_IP) {
+		uint16_t	*cksump;
+		uint32_t	cksum;
+		ipaddr_t	src = ipha->ipha_src;
+		ipaddr_t	dst = ipha->ipha_dst;
+
+		/*
+		 * Our native IP stack doesn't set the L4 length field
+		 * of the pseudo header when LSO is in play. Other IP
+		 * stacks, e.g. Linux, do include the length field.
+		 * This is a problem because the hardware expects that
+		 * the length field is not set. When it is set it will
+		 * cause an incorrect TCP checksum to be generated.
+		 * The reason this works in Linux is because Linux
+		 * corrects the pseudo-header checksum in the driver
+		 * code. In order to get the correct HW checksum we
+		 * need to assume the guest's IP stack gave us a bogus
+		 * TCP partial checksum and calculate it ourselves.
+		 */
+		cksump = IPH_TCPH_CHECKSUMP(ipha, IPH_HDR_LENGTH(ipha));
+		cksum = IP_TCP_CSUM_COMP;
+		cksum += (dst >> 16) + (dst & 0xFFFF) +
+		    (src >> 16) + (src & 0xFFFF);
+		cksum = (cksum & 0xFFFF) + (cksum >> 16);
+		*(cksump) = (cksum & 0xFFFF) + (cksum >> 16);
+
+		/*
+		 * Since viona is a "legacy device", the data stored
+		 * by the driver will be in the guest's native endian
+		 * format (see sections 2.4.3 and 5.1.6.1 of the
+		 * VIRTIO 1.0 spec for more info). At this time the
+		 * only guests using viona are x86 and we can assume
+		 * little-endian.
+		 */
+		lso_info_set(mp, LE_16(hdr->vrh_gso_size), HW_LSO);
+
+		/*
+		 * Hardware, like ixgbe, expects the client to request
+		 * IP header checksum offload if it's sending LSO (see
+		 * ixgbe_get_context()). Unfortunately, virtio makes
+		 * no allowances for negotiating IP header checksum
+		 * and HW offload, only TCP checksum. We add the flag
+		 * and zero-out the checksum field. This mirrors the
+		 * behavior of our native IP stack (which does this in
+		 * the interest of HW that expects the field to be
+		 * zero).
+		 */
+		flags |= HCK_IPV4_HDRCKSUM;
+		ipha->ipha_hdr_checksum = 0;
+	}
+
+	/*
+	 * Use DB_CKSUMFLAGS instead of mac_hcksum_get() to make sure
+	 * HW_LSO, if present, is not lost.
+	 */
+	flags |= DB_CKSUMFLAGS(mp);
 
 	/*
 	 * Partial checksum support from the NIC is ideal, since it most
@@ -2258,14 +2608,14 @@ viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
 		uint_t start, stuff, end;
 
 		/*
-		 * The lower-level driver is expecting these offsets to be
-		 * relative to the start of the L3 header rather than the
-		 * ethernet frame.
+		 * MAC expects these offsets to be relative to the
+		 * start of the L3 header rather than the L2 frame.
 		 */
 		start = hdr->vrh_csum_start - eth_len;
 		stuff = start + hdr->vrh_csum_offset;
 		end = len - eth_len;
-		mac_hcksum_set(mp, start, stuff, end, 0, HCK_PARTIALCKSUM);
+		flags |= HCK_PARTIALCKSUM;
+		mac_hcksum_set(mp, start, stuff, end, 0, flags);
 		return (B_TRUE);
 	}
 
@@ -2277,7 +2627,8 @@ viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
 	if (ftype == ETHERTYPE_IP) {
 		if ((link->l_cap_csum & HCKSUM_INET_FULL_V4) != 0 &&
 		    (ipproto == IPPROTO_TCP || ipproto == IPPROTO_UDP)) {
-			mac_hcksum_set(mp, 0, 0, 0, 0, HCK_FULLCKSUM);
+			flags |= HCK_FULLCKSUM;
+			mac_hcksum_set(mp, 0, 0, 0, 0, flags);
 			return (B_TRUE);
 		}
 
@@ -2288,7 +2639,8 @@ viona_tx_csum(viona_vring_t *ring, const struct virtio_net_hdr *hdr,
 	} else if (ftype == ETHERTYPE_IPV6) {
 		if ((link->l_cap_csum & HCKSUM_INET_FULL_V6) != 0 &&
 		    (ipproto == IPPROTO_TCP || ipproto == IPPROTO_UDP)) {
-			mac_hcksum_set(mp, 0, 0, 0, 0, HCK_FULLCKSUM);
+			flags |= HCK_FULLCKSUM;
+			mac_hcksum_set(mp, 0, 0, 0, 0, flags);
 			return (B_TRUE);
 		}
 
@@ -2309,8 +2661,9 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 {
 	struct iovec		iov[VTNET_MAXSEGS];
 	uint16_t		cookie;
-	int			n;
-	uint32_t		len;
+	int			i, n;
+	uint32_t		len, base_off = 0;
+	uint32_t		min_copy = VIONA_MAX_HDRS_LEN;
 	mblk_t			*mp_head, *mp_tail, *mp;
 	viona_desb_t		*dp = NULL;
 	mac_client_handle_t	link_mch = link->l_mch;
@@ -2325,6 +2678,14 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 		return;
 	}
 
+	/* Grab the header and ensure it is of adequate length */
+	hdr = (const struct virtio_net_hdr *)iov[0].iov_base;
+	len = iov[0].iov_len;
+	if (len < sizeof (struct virtio_net_hdr)) {
+		goto drop_fail;
+	}
+
+	/* Make sure the packet headers are always in the first mblk. */
 	if (ring->vr_desb != NULL) {
 		dp = &ring->vr_desb[cookie];
 
@@ -2339,46 +2700,128 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 			dp = NULL;
 			goto drop_fail;
 		}
+
 		dp->d_cookie = cookie;
+		mp_head = desballoc(dp->d_headers, VIONA_MAX_HDRS_LEN, 0,
+		    &dp->d_frtn);
+
+		/* Account for the successful desballoc. */
+		if (mp_head != NULL)
+			dp->d_ref++;
+	} else {
+		mp_head = allocb(VIONA_MAX_HDRS_LEN, 0);
 	}
 
-	/* Grab the header and ensure it is of adequate length */
-	hdr = (const struct virtio_net_hdr *)iov[0].iov_base;
-	len = iov[0].iov_len;
-	if (len < sizeof (struct virtio_net_hdr)) {
+	if (mp_head == NULL)
 		goto drop_fail;
+
+	mp_tail = mp_head;
+
+	/*
+	 * We always copy enough of the guest data to cover the
+	 * headers. This protects us from TOCTOU attacks and allows
+	 * message block length assumptions to be made in subsequent
+	 * code. In many cases, this means copying more data than
+	 * strictly necessary. That's okay, as it is the larger packets
+	 * (such as LSO) that really benefit from desballoc().
+	 */
+	for (i = 1; i < n; i++) {
+		const uint32_t to_copy = MIN(min_copy, iov[i].iov_len);
+
+		bcopy(iov[i].iov_base, mp_head->b_wptr, to_copy);
+		mp_head->b_wptr += to_copy;
+		len += to_copy;
+		min_copy -= to_copy;
+
+		/*
+		 * We've met the minimum copy requirement. The rest of
+		 * the guest data can be referenced.
+		 */
+		if (min_copy == 0) {
+			/*
+			 * If we copied all contents of this
+			 * descriptor then move onto the next one.
+			 * Otherwise, record how far we are into the
+			 * current descriptor.
+			 */
+			if (iov[i].iov_len == to_copy)
+				i++;
+			else
+				base_off = to_copy;
+
+			break;
+		}
 	}
 
-	for (uint_t i = 1; i < n; i++) {
+	ASSERT3P(mp_head, !=, NULL);
+	ASSERT3P(mp_tail, !=, NULL);
+
+	for (; i < n; i++) {
+		uintptr_t base = (uintptr_t)iov[i].iov_base + base_off;
+		uint32_t chunk = iov[i].iov_len - base_off;
+
+		ASSERT3U(base_off, <, iov[i].iov_len);
+		ASSERT3U(chunk, >, 0);
+
 		if (dp != NULL) {
-			mp = desballoc((uchar_t *)iov[i].iov_base,
-			    iov[i].iov_len, BPRI_MED, &dp->d_frtn);
+			mp = desballoc((uchar_t *)base, chunk, 0, &dp->d_frtn);
 			if (mp == NULL) {
 				goto drop_fail;
 			}
 			dp->d_ref++;
 		} else {
-			mp = allocb(iov[i].iov_len, BPRI_MED);
+			mp = allocb(chunk, BPRI_MED);
 			if (mp == NULL) {
 				goto drop_fail;
 			}
-			bcopy((uchar_t *)iov[i].iov_base, mp->b_wptr,
-			    iov[i].iov_len);
+			bcopy((uchar_t *)base, mp->b_wptr, chunk);
 		}
 
-		len += iov[i].iov_len;
-		mp->b_wptr += iov[i].iov_len;
-		if (mp_head == NULL) {
-			ASSERT(mp_tail == NULL);
-			mp_head = mp;
-		} else {
-			ASSERT(mp_tail != NULL);
-			mp_tail->b_cont = mp;
-		}
+		base_off = 0;
+		len += chunk;
+		mp->b_wptr += chunk;
+		mp_tail->b_cont = mp;
 		mp_tail = mp;
 	}
 
-	/* Request hardware checksumming, if necessary */
+	if (VNETHOOK_INTERESTED_OUT(link->l_neti)) {
+		/*
+		 * The hook consumer may elect to free the mblk_t and set
+		 * our mblk_t ** to NULL.  When using a viona_desb_t
+		 * (dp != NULL), we do not want the corresponding cleanup to
+		 * occur during the viona_hook() call. We instead want to
+		 * reset and recycle dp for future use.  To prevent cleanup
+		 * during the viona_hook() call, we take a ref on dp (if being
+		 * used), and release it on success.  On failure, the
+		 * freemsgchain() call will release all the refs taken earlier
+		 * in viona_tx() (aside from the initial ref and the one we
+		 * take), and drop_hook will reset dp for reuse.
+		 */
+		if (dp != NULL)
+			dp->d_ref++;
+
+		/*
+		 * Pass &mp instead of &mp_head so we don't lose track of
+		 * mp_head if the hook consumer (i.e. ipf) elects to free mp
+		 * and set mp to NULL.
+		 */
+		mp = mp_head;
+		if (viona_hook(link, ring, &mp, B_TRUE) != 0) {
+			if (mp != NULL)
+				freemsgchain(mp);
+			goto drop_hook;
+		}
+
+		if (dp != NULL)
+			dp->d_ref--;
+	}
+
+	/*
+	 * Request hardware checksumming, if necessary. If the guest
+	 * sent an LSO packet then it must have also negotiated and
+	 * requested partial checksum; therefore the LSO logic is
+	 * contained within viona_tx_csum().
+	 */
 	if ((link->l_features & VIRTIO_NET_F_CSUM) != 0 &&
 	    (hdr->vrh_flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) != 0) {
 		if (!viona_tx_csum(ring, hdr, mp_head, len - iov[0].iov_len)) {
@@ -2400,7 +2843,13 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 		viona_tx_done(ring, len, cookie);
 	}
 
+	/*
+	 * We're potentially going deep into the networking layer; make sure the
+	 * guest can't run concurrently.
+	 */
+	ht_begin_unsafe();
 	mac_tx(link_mch, mp_head, 0, MAC_DROP_ON_NO_DESC, NULL);
+	ht_end_unsafe();
 	return;
 
 drop_fail:
@@ -2425,6 +2874,8 @@ drop_fail:
 	 * dropped data to be released to the used ring.
 	 */
 	freemsgchain(mp_head);
+
+drop_hook:
 	len = 0;
 	for (uint_t i = 0; i < n; i++) {
 		len += iov[i].iov_len;
@@ -2439,7 +2890,383 @@ drop_fail:
 		dp->d_ref = 0;
 	}
 
-	VIONA_PROBE3(tx_drop, viona_vring_t *, ring, uint_t, len,
+	VIONA_PROBE3(tx_drop, viona_vring_t *, ring, uint32_t, len,
 	    uint16_t, cookie);
 	viona_tx_done(ring, len, cookie);
+}
+
+/*
+ * Generate a hook event for the packet in *mpp headed in the direction
+ * indicated by 'out'.  If the packet is accepted, 0 is returned.  If the
+ * packet is rejected, an error is returned.  The hook function may or may not
+ * alter or even free *mpp.  The caller is expected to deal with either
+ * situation.
+ */
+static int
+viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
+{
+	viona_neti_t *nip = link->l_neti;
+	viona_nethook_t *vnh = &nip->vni_nethook;
+	hook_pkt_event_t info;
+	hook_event_t he;
+	hook_event_token_t het;
+	int ret;
+
+	he = out ? vnh->vnh_event_out : vnh->vnh_event_in;
+	het = out ? vnh->vnh_token_out : vnh->vnh_token_in;
+
+	if (!he.he_interested)
+		return (0);
+
+	info.hpe_protocol = vnh->vnh_neti;
+	info.hpe_ifp = (phy_if_t)link;
+	info.hpe_ofp = (phy_if_t)link;
+	info.hpe_mp = mpp;
+	info.hpe_flags = 0;
+
+	ret = hook_run(vnh->vnh_neti->netd_hooks, het, (hook_data_t)&info);
+	if (ret == 0)
+		return (0);
+
+	if (out) {
+		VIONA_PROBE3(tx_hook_drop, viona_vring_t *, ring,
+		    mblk_t *, *mpp, int, ret);
+		VIONA_RING_STAT_INCR(ring, tx_hookdrop);
+	} else {
+		VIONA_PROBE3(rx_hook_drop, viona_vring_t *, ring,
+		    mblk_t *, *mpp, int, ret);
+		VIONA_RING_STAT_INCR(ring, rx_hookdrop);
+	}
+	return (ret);
+}
+
+/*
+ * netinfo stubs - required by the nethook framework, but otherwise unused
+ *
+ * Currently, all ipf rules are applied against all interfaces in a given
+ * netstack (e.g. all interfaces in a zone).  In the future if we want to
+ * support being able to apply different rules to different interfaces, I
+ * believe we would need to implement some of these stubs to map an interface
+ * name in a rule (e.g. 'net0', back to an index or viona_link_t);
+ */
+static int
+viona_neti_getifname(net_handle_t neti __unused, phy_if_t phy __unused,
+    char *buf __unused, const size_t len __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_getmtu(net_handle_t neti __unused, phy_if_t phy __unused,
+    lif_if_t ifdata __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_getptmue(net_handle_t neti __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_getlifaddr(net_handle_t neti __unused, phy_if_t phy __unused,
+    lif_if_t ifdata __unused, size_t nelem __unused,
+    net_ifaddr_t type[] __unused, void *storage __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_getlifzone(net_handle_t neti __unused, phy_if_t phy __unused,
+    lif_if_t ifdata __unused, zoneid_t *zid __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_getlifflags(net_handle_t neti __unused, phy_if_t phy __unused,
+    lif_if_t ifdata __unused, uint64_t *flags __unused)
+{
+	return (-1);
+}
+
+static phy_if_t
+viona_neti_phygetnext(net_handle_t neti __unused, phy_if_t phy __unused)
+{
+	return ((phy_if_t)-1);
+}
+
+static phy_if_t
+viona_neti_phylookup(net_handle_t neti __unused, const char *name __unused)
+{
+	return ((phy_if_t)-1);
+}
+
+static lif_if_t
+viona_neti_lifgetnext(net_handle_t neti __unused, phy_if_t phy __unused,
+    lif_if_t ifdata __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_inject(net_handle_t neti __unused, inject_t style __unused,
+    net_inject_t *packet __unused)
+{
+	return (-1);
+}
+
+static phy_if_t
+viona_neti_route(net_handle_t neti __unused, struct sockaddr *address __unused,
+    struct sockaddr *next __unused)
+{
+	return ((phy_if_t)-1);
+}
+
+static int
+viona_neti_ispchksum(net_handle_t neti __unused, mblk_t *mp __unused)
+{
+	return (-1);
+}
+
+static int
+viona_neti_isvchksum(net_handle_t neti __unused, mblk_t *mp __unused)
+{
+	return (-1);
+}
+
+static net_protocol_t viona_netinfo = {
+	NETINFO_VERSION,
+	NHF_VIONA,
+	viona_neti_getifname,
+	viona_neti_getmtu,
+	viona_neti_getptmue,
+	viona_neti_getlifaddr,
+	viona_neti_getlifzone,
+	viona_neti_getlifflags,
+	viona_neti_phygetnext,
+	viona_neti_phylookup,
+	viona_neti_lifgetnext,
+	viona_neti_inject,
+	viona_neti_route,
+	viona_neti_ispchksum,
+	viona_neti_isvchksum
+};
+
+/*
+ * Create/register our nethooks
+ */
+static int
+viona_nethook_init(netid_t nid, viona_nethook_t *vnh, char *nh_name,
+    net_protocol_t *netip)
+{
+	int ret;
+
+	if ((vnh->vnh_neti = net_protocol_register(nid, netip)) == NULL) {
+		cmn_err(CE_NOTE, "%s: net_protocol_register failed "
+		    "(netid=%d name=%s)", __func__, nid, nh_name);
+		goto fail_init_proto;
+	}
+
+	HOOK_FAMILY_INIT(&vnh->vnh_family, nh_name);
+	if ((ret = net_family_register(vnh->vnh_neti, &vnh->vnh_family)) != 0) {
+		cmn_err(CE_NOTE, "%s: net_family_register failed "
+		    "(netid=%d name=%s err=%d)", __func__,
+		    nid, nh_name, ret);
+		goto fail_init_family;
+	}
+
+	HOOK_EVENT_INIT(&vnh->vnh_event_in, NH_PHYSICAL_IN);
+	if ((vnh->vnh_token_in = net_event_register(vnh->vnh_neti,
+	    &vnh->vnh_event_in)) == NULL) {
+		cmn_err(CE_NOTE, "%s: net_event_register %s failed "
+		    "(netid=%d name=%s)", __func__, NH_PHYSICAL_IN, nid,
+		    nh_name);
+		goto fail_init_event_in;
+	}
+
+	HOOK_EVENT_INIT(&vnh->vnh_event_out, NH_PHYSICAL_OUT);
+	if ((vnh->vnh_token_out = net_event_register(vnh->vnh_neti,
+	    &vnh->vnh_event_out)) == NULL) {
+		cmn_err(CE_NOTE, "%s: net_event_register %s failed "
+		    "(netid=%d name=%s)", __func__, NH_PHYSICAL_OUT, nid,
+		    nh_name);
+		goto fail_init_event_out;
+	}
+	return (0);
+
+	/*
+	 * On failure, we undo all the steps that succeeded in the
+	 * reverse order of initialization, starting at the last
+	 * successful step (the labels denoting the failing step).
+	 */
+fail_init_event_out:
+	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_in));
+	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_in));
+	vnh->vnh_token_in = NULL;
+
+fail_init_event_in:
+	VERIFY0(net_family_shutdown(vnh->vnh_neti, &vnh->vnh_family));
+	VERIFY0(net_family_unregister(vnh->vnh_neti, &vnh->vnh_family));
+
+fail_init_family:
+	VERIFY0(net_protocol_unregister(vnh->vnh_neti));
+	vnh->vnh_neti = NULL;
+
+fail_init_proto:
+	return (1);
+}
+
+/*
+ * Shutdown the nethooks for a protocol family.  This triggers notification
+ * callbacks to anything that has registered interest to allow hook consumers
+ * to unhook prior to the removal of the hooks as well as makes them unavailable
+ * to any future consumers as the first step of removal.
+ */
+static void
+viona_nethook_shutdown(viona_nethook_t *vnh)
+{
+	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_out));
+	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_in));
+	VERIFY0(net_family_shutdown(vnh->vnh_neti, &vnh->vnh_family));
+}
+
+/*
+ * Remove the nethooks for a protocol family.
+ */
+static void
+viona_nethook_fini(viona_nethook_t *vnh)
+{
+	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_out));
+	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_in));
+	VERIFY0(net_family_unregister(vnh->vnh_neti, &vnh->vnh_family));
+	VERIFY0(net_protocol_unregister(vnh->vnh_neti));
+	vnh->vnh_neti = NULL;
+}
+
+/*
+ * Callback invoked by the neti module.  This creates/registers our hooks
+ * {IPv4,IPv6}{in,out} with the nethook framework so they are available to
+ * interested consumers (e.g. ipf).
+ *
+ * During attach, viona_neti_create is called once for every netstack
+ * present on the system at the time of attach.  Thereafter, it is called
+ * during the creation of additional netstack instances (i.e. zone boot).  As a
+ * result, the viona_neti_t that is created during this call always occurs
+ * prior to any viona instances that will use it to send hook events.
+ *
+ * It should never return NULL.  If we cannot register our hooks, we do not
+ * set vnh_hooked of the respective protocol family, which will prevent the
+ * creation of any viona instances on this netstack (see viona_ioc_create).
+ * This can only occur if after a shutdown event (which means destruction is
+ * imminent) we are trying to create a new instance.
+ */
+static void *
+viona_neti_create(const netid_t netid)
+{
+	viona_neti_t *nip;
+
+	VERIFY(netid != -1);
+
+	nip = kmem_zalloc(sizeof (*nip), KM_SLEEP);
+	nip->vni_netid = netid;
+	nip->vni_zid = net_getzoneidbynetid(netid);
+	mutex_init(&nip->vni_lock, NULL, MUTEX_DRIVER, NULL);
+	list_create(&nip->vni_dev_list, sizeof (viona_soft_state_t),
+	    offsetof(viona_soft_state_t, ss_node));
+
+	if (viona_nethook_init(netid, &nip->vni_nethook, Hn_VIONA,
+	    &viona_netinfo) == 0)
+		nip->vni_nethook.vnh_hooked = B_TRUE;
+
+	mutex_enter(&viona_neti_lock);
+	list_insert_tail(&viona_neti_list, nip);
+	mutex_exit(&viona_neti_lock);
+
+	return (nip);
+}
+
+/*
+ * Called during netstack teardown by the neti module.  During teardown, all
+ * the shutdown callbacks are invoked, allowing consumers to release any holds
+ * and otherwise quiesce themselves prior to destruction, followed by the
+ * actual destruction callbacks.
+ */
+static void
+viona_neti_shutdown(netid_t nid, void *arg)
+{
+	viona_neti_t *nip = arg;
+
+	ASSERT(nip != NULL);
+	VERIFY(nid == nip->vni_netid);
+
+	mutex_enter(&viona_neti_lock);
+	list_remove(&viona_neti_list, nip);
+	mutex_exit(&viona_neti_lock);
+
+	if (nip->vni_nethook.vnh_hooked)
+		viona_nethook_shutdown(&nip->vni_nethook);
+}
+
+/*
+ * Called during netstack teardown by the neti module.  Destroys the viona
+ * netinst data.  This is invoked after all the netstack and neti shutdown
+ * callbacks have been invoked.
+ */
+static void
+viona_neti_destroy(netid_t nid, void *arg)
+{
+	viona_neti_t *nip = arg;
+
+	ASSERT(nip != NULL);
+	VERIFY(nid == nip->vni_netid);
+
+	mutex_enter(&nip->vni_lock);
+	while (nip->vni_ref != 0)
+		cv_wait(&nip->vni_ref_change, &nip->vni_lock);
+	mutex_exit(&nip->vni_lock);
+
+	VERIFY(!list_link_active(&nip->vni_node));
+
+	if (nip->vni_nethook.vnh_hooked)
+		viona_nethook_fini(&nip->vni_nethook);
+
+	mutex_destroy(&nip->vni_lock);
+	list_destroy(&nip->vni_dev_list);
+	kmem_free(nip, sizeof (*nip));
+}
+
+/*
+ * Find the viona netinst data by zone id.  This is only used during
+ * viona instance creation (and thus is only called by a zone that is running).
+ */
+static viona_neti_t *
+viona_neti_lookup_by_zid(zoneid_t zid)
+{
+	viona_neti_t *nip;
+
+	mutex_enter(&viona_neti_lock);
+	for (nip = list_head(&viona_neti_list); nip != NULL;
+	    nip = list_next(&viona_neti_list, nip)) {
+		if (nip->vni_zid == zid) {
+			mutex_enter(&nip->vni_lock);
+			nip->vni_ref++;
+			mutex_exit(&nip->vni_lock);
+			mutex_exit(&viona_neti_lock);
+			return (nip);
+		}
+	}
+	mutex_exit(&viona_neti_lock);
+	return (NULL);
+}
+
+static void
+viona_neti_rele(viona_neti_t *nip)
+{
+	mutex_enter(&nip->vni_lock);
+	VERIFY3S(nip->vni_ref, >, 0);
+	nip->vni_ref--;
+	mutex_exit(&nip->vni_lock);
+	cv_broadcast(&nip->vni_ref_change);
 }

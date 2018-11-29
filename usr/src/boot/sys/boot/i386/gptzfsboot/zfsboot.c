@@ -228,10 +228,22 @@ main(void)
      */
 
     if (auto_boot && !*kname) {
-	memcpy(kname, PATH_LOADER_ZFS, sizeof(PATH_LOADER_ZFS));
+	memcpy(kname, PATH_LOADER, sizeof(PATH_LOADER));
 	if (!keyhit(3)) {
 	    load();
 	    auto_boot = 0;
+	    /*
+	     * Try to fall back to /boot/zfsloader.
+	     * This fallback should be eventually removed.
+	     * Created: 08/03/2018
+	     */
+#define	PATH_ZFSLOADER "/boot/zfsloader"
+	    memcpy(kname, PATH_ZFSLOADER, sizeof(PATH_ZFSLOADER));
+	    load();
+	    /*
+	     * Still there? restore default loader name for prompt.
+	     */
+	    memcpy(kname, PATH_LOADER, sizeof(PATH_LOADER));
 	}
     }
 
@@ -712,6 +724,8 @@ i386_zfs_probe(void)
 	for (unit = 0; unit < MAXBDDEV; unit++) {
 		if (bd_unit2bios(unit) == -1)
 			break;
+		if (bd_unit2bios(unit) < 0x80)
+			continue;
 
 		sprintf(devname, "disk%d:", unit);
 		/* If this is not boot disk, use generic probe. */
@@ -720,14 +734,4 @@ i386_zfs_probe(void)
 		else
 			probe_disk(devname);
 	}
-}
-
-uint64_t
-ldi_get_size(void *priv)
-{
-	int fd = (uintptr_t) priv;
-	uint64_t size;
-
-	ioctl(fd, DIOCGMEDIASIZE, &size);
-	return (size);
 }

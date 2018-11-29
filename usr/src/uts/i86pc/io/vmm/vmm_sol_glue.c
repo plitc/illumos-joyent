@@ -294,12 +294,15 @@ contigfree(void *addr, unsigned long size, struct malloc_type *type)
 void
 mtx_init(struct mtx *mtx, char *name, const char *type_name, int opts)
 {
-	if (opts & MTX_SPIN) {
-		mutex_init(&mtx->m, name, MUTEX_SPIN,
-		    (ddi_iblock_cookie_t)ipltospl(DISP_LEVEL));
-	} else {
-		mutex_init(&mtx->m, name, MUTEX_DRIVER, NULL);
-	}
+	/*
+	 * Requests that a mutex be initialized to the MTX_SPIN type are
+	 * ignored.  The limitations which may have required spinlocks on
+	 * FreeBSD do not apply to how bhyve has been structured here.
+	 *
+	 * Adaptive mutexes are required to avoid deadlocks when certain
+	 * cyclics behavior interacts with interrupts and contended locks.
+	 */
+	mutex_init(&mtx->m, name, MUTEX_ADAPTIVE, NULL);
 }
 
 void
@@ -318,58 +321,6 @@ void
 critical_exit(void)
 {
 	kpreempt_enable();
-}
-
-struct unrhdr;
-static kmutex_t unr_lock;
-static uint_t unr_idx;
-
-/*
- * Allocate a new unrheader set.
- *
- * Highest and lowest valid values given as parameters.
- */
-struct unrhdr *
-new_unrhdr(int low, int high, struct mtx *mtx)
-{
-	id_space_t *ids;
-	char name[] = "vmm_unr_00000000";
-
-	ASSERT(mtx == NULL);
-
-	mutex_enter(&unr_lock);
-	/* Get a unique name for the id space */
-	(void) snprintf(name, sizeof (name), "vmm_unr_%08X", unr_idx);
-	VERIFY(++unr_idx != UINT_MAX);
-	mutex_exit(&unr_lock);
-
-	ids = id_space_create(name, low, high);
-
-	return ((struct unrhdr *)ids);
-}
-
-void
-delete_unrhdr(struct unrhdr *uh)
-{
-	id_space_t *ids = (id_space_t *)uh;
-
-	id_space_destroy(ids);
-}
-
-int
-alloc_unr(struct unrhdr *uh)
-{
-	id_space_t *ids = (id_space_t *)uh;
-
-	return (id_alloc(ids));
-}
-
-void
-free_unr(struct unrhdr *uh, u_int item)
-{
-	id_space_t *ids = (id_space_t *)uh;
-
-	id_free(ids, item);
 }
 
 
@@ -571,7 +522,6 @@ vmm_sol_glue_init(void)
 {
 	vmm_alloc_init();
 	vmm_cpuid_init();
-	unr_idx = 0;
 }
 
 void
