@@ -27,6 +27,7 @@
 
 #include "linux.h"
 #include "bootstrap.h"
+#include "vbe.h"
 #include "libi386.h"
 #include "btxv86.h"
 
@@ -292,7 +293,7 @@ linux_exec(struct preloaded_file *fp)
 
 	i386_getdev((void **)(&rootdev), fp->f_name, NULL);
 	if (rootdev != NULL)
-		relocator_edx = bd_unit2bios(rootdev->dd.d_unit);
+		relocator_edx = bd_unit2bios(rootdev);
 
 	/*
 	 * command line
@@ -395,6 +396,8 @@ linux_exec(struct preloaded_file *fp)
 	relocator_a20_enabled = 1;
 	i386_copyin(relocater, 0x600, relocater_size);
 
+	/* Set VGA text mode */
+	bios_set_text_mode(3);
 	dev_cleanup();
 
 	__exec((void *)0x600);
